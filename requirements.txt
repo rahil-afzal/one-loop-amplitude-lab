@@ -1,0 +1,2 @@
+# Convenience file; the source of truth is pyproject.toml.
+-e .[dev,gemini]

@@ -1,0 +1,13 @@
+{
+  "name": "yhg_dim4_one_loop",
+  "process": "phi1 phi1 -> phi1 phi1",
+  "couplings": {
+    "c4": 0.7,
+    "c42": 0.4
+  },
+  "mu2": 1.0,
+  "s0": 2.0,
+  "loop_order": 1,
+  "scheme": "MSbar",
+  "description": "Two massless scalars, dim-4 couplings only; one-loop finite MSbar bubbles and the dim-4 dispersion contribution (Ye-He-Gu Eq. 3.11 subset)."
+}
