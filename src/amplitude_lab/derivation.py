@@ -44,7 +44,7 @@ def _format_elapsed(seconds: float) -> str:
 
 
 class DerivationLog:
-    def __init__(self, base: str | Path, task, llm):
+    def __init__(self, base: str | Path, task, llm, audit_llm=None):
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.dir = Path(base) / f"{stamp}-{task.name}-derivation"
         suffix = 1
@@ -59,6 +59,11 @@ class DerivationLog:
             "workflow": "derive_then_model_audit",
             "prompt_sha256": hashlib.sha256(self.prompt.encode("utf-8")).hexdigest(),
             "llm": llm.describe() if hasattr(llm, "describe") else {"name": str(llm)},
+            "audit_llm": (
+                audit_llm.describe()
+                if audit_llm is not None and hasattr(audit_llm, "describe")
+                else {"name": getattr(audit_llm or llm, "name", "unknown")}
+            ),
         }
         (self.dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         (self.dir / "prompt.md").write_text(self.prompt, encoding="utf-8")
@@ -113,6 +118,7 @@ class DerivationResult:
     model: str
     status: str
     run_dir: str
+    audit_model: str = ""
     elapsed_seconds: float = 0.0
     derivation_seconds: float = 0.0
     audit_seconds: float = 0.0
@@ -147,12 +153,13 @@ def _request(llm, system: str, messages: list[dict[str, str]], label: str, progr
     return response, elapsed
 
 
-def run_derivation(task, llm, runs_dir="runs", echo=None) -> DerivationResult:
+def run_derivation(task, llm, runs_dir="runs", echo=None, audit_llm=None) -> DerivationResult:
     """Request a derivation and then a separate model audit; save both in a report."""
     if not task.derivation_prompt.strip():
         raise ValueError(f"task {task.name!r} has no analytical derivation prompt")
 
-    log = DerivationLog(runs_dir, task, llm)
+    audit_llm = audit_llm or llm
+    log = DerivationLog(runs_dir, task, llm, audit_llm)
     say = echo or (lambda message: None)
     started = time.monotonic()
     result = DerivationResult(
@@ -160,6 +167,7 @@ def run_derivation(task, llm, runs_dir="runs", echo=None) -> DerivationResult:
         model=getattr(llm, "name", "unknown"),
         status="failed",
         run_dir=str(log.dir),
+        audit_model=getattr(audit_llm, "name", "unknown"),
     )
     derivation = ""
     audit = ""
@@ -185,7 +193,7 @@ def run_derivation(task, llm, runs_dir="runs", echo=None) -> DerivationResult:
             {"role": "user", "text": AUDIT_REQUEST},
         ]
         audit, result.audit_seconds = _request(
-            llm, AUDIT_SYSTEM, audit_messages, "separate model audit", say
+            audit_llm, AUDIT_SYSTEM, audit_messages, "separate model audit", say
         )
         if not audit.strip():
             raise LLMError("Separate model audit returned an empty response.")

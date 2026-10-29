@@ -5,7 +5,7 @@ from . import reference
 from .agent import run_agent
 from .candidate import Candidate
 from .derivation import run_derivation
-from .llm import GeminiLLM, LLMError
+from .llm import LLMError, llm_from_env
 from .task import Task
 from .verify import verify
 
@@ -54,7 +54,9 @@ def cmd_selftest(args):
 def cmd_agent(args):
     task = Task.load(args.task)
     try:
-        llm = GeminiLLM.from_env(model=args.model, temperature=args.temperature)
+        llm = llm_from_env(
+            provider=args.provider, model=args.model, temperature=args.temperature
+        )
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -80,14 +82,23 @@ def cmd_derive(args):
         print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
         return 2
     try:
-        llm = GeminiLLM.from_env(model=args.model, temperature=args.temperature)
+        llm = llm_from_env(
+            provider=args.provider, model=args.model, temperature=args.temperature
+        )
+        audit_llm = (
+            llm_from_env(
+                provider=args.provider, model=args.audit_model, temperature=args.temperature
+            )
+            if args.audit_model
+            else llm
+        )
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(
-        f"task {task.name}, model {llm.name}; deriving and then requesting a separate model audit"
+    print(f"task {task.name}, model {llm.name}; audit model {audit_llm.name}")
+    result = run_derivation(
+        task, llm, runs_dir=args.runs_dir, echo=print, audit_llm=audit_llm
     )
-    result = run_derivation(task, llm, runs_dir=args.runs_dir, echo=print)
     minutes, seconds = divmod(int(result.elapsed_seconds), 60)
     elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
     print(f"derivation workflow {result.status}; elapsed {elapsed_text}")
@@ -125,18 +136,21 @@ def main(argv=None):
     s.add_argument("--details", action="store_true")
     s.set_defaults(func=cmd_selftest)
 
-    a = sub.add_parser("agent", help="let a Gemini model work on the task")
+    a = sub.add_parser("agent", help="let a configured model work on the code task")
     a.add_argument("--task", default="phi4_dim4")
     a.add_argument("--model", default=None)
+    a.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
     a.add_argument("--temperature", type=float, default=0.7)
     a.add_argument("--runs-dir", default="runs")
     a.set_defaults(func=cmd_agent)
 
     d = sub.add_parser(
-        "derive", help="ask Gemini for an analytical amplitude and a separate model audit"
+        "derive", help="derive an analytical amplitude and request a separate model audit"
     )
     d.add_argument("--task", default="phi4_dim4")
     d.add_argument("--model", default=None)
+    d.add_argument("--audit-model", default=None, help="different model ID for the audit request")
+    d.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
     d.add_argument("--temperature", type=float, default=0.2)
     d.add_argument("--runs-dir", default="runs")
     d.set_defaults(func=cmd_derive)

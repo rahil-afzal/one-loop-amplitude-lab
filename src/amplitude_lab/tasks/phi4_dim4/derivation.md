@@ -19,8 +19,8 @@ explicitly.
 
 ## Deliverable
 
-Return a Markdown derivation with a boxed LaTeX expression for A(s,t,u), valid through order
-c4^2. Include:
+Return a concise Markdown derivation (aim for fewer than 1,500 words) with a boxed LaTeX
+expression for A(s,t,u), valid through order c4^2. Include:
 
 1. The tree contribution and the one-loop channel contributions, with symmetry factors.
 2. The scalar bubble integral and its MS-bar subtraction, showing enough intermediate

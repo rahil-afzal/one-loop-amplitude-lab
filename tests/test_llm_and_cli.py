@@ -1,7 +1,16 @@
+import io
+import json
+
 import pytest
 
 from amplitude_lab.cli import main
-from amplitude_lab.llm import GeminiLLM, LLMError
+from amplitude_lab.llm import (
+    DEFAULT_OPENAI_BASE_URL,
+    GeminiLLM,
+    LLMError,
+    OpenAICompatibleLLM,
+    llm_from_env,
+)
 
 from .conftest import CANDIDATES
 
@@ -26,13 +35,128 @@ def test_gemini_timeout_from_env(monkeypatch):
     assert GeminiLLM.from_env(use_dotenv=False).timeout == 300
 
 
+def test_gemini_default_timeout_is_unchanged(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    assert GeminiLLM.from_env(use_dotenv=False).timeout == 120
+
+
 @pytest.mark.parametrize("bad", ["abc", "0", "-3", "nan", "inf", "-inf"])
 def test_gemini_bad_timeout_from_env_rejected(monkeypatch, bad):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "m")
     monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", bad)
-    with pytest.raises(LLMError, match="GEMINI_TIMEOUT_SECONDS"):
+    with pytest.raises(LLMError, match="LLM_TIMEOUT_SECONDS"):
         GeminiLLM.from_env(use_dotenv=False)
+
+
+def test_compatible_provider_config_from_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "gateway-secret")
+    monkeypatch.setenv("LLM_MODEL", "qwen-3.7-plus")
+    monkeypatch.setenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "180")
+    client = llm_from_env(use_dotenv=False)
+    assert isinstance(client, OpenAICompatibleLLM)
+    assert client.model == "qwen-3.7-plus"
+    assert client.base_url == "https://tokens.bd/v1"
+    assert client.timeout == 180
+    assert "gateway-secret" not in repr(client)
+    assert "gateway-secret" not in str(client.describe())
+
+
+def test_compatible_provider_requires_api_key_and_model(monkeypatch):
+    with pytest.raises(LLMError, match="OPENAI_API_KEY"):
+        OpenAICompatibleLLM.from_env(use_dotenv=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    with pytest.raises(LLMError, match="LLM_MODEL"):
+        OpenAICompatibleLLM.from_env(use_dotenv=False)
+
+
+def test_compatible_provider_request_shape(monkeypatch):
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            seen["read_limit"] = size
+            return json.dumps(
+                {"choices": [{"message": {"content": "  derived result  "}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["authorization"] = request.get_header("Authorization")
+        seen["payload"] = json.loads(request.data)
+        seen["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("amplitude_lab.llm.urlopen", fake_urlopen)
+    client = OpenAICompatibleLLM(
+        "secret-token", "deepseek-4.1-flash", temperature=0.1, timeout=180
+    )
+    result = client.complete(
+        "derive carefully",
+        [{"role": "user", "text": "derive"}, {"role": "assistant", "text": "audit"}],
+    )
+    assert result == "derived result"
+    assert seen["url"] == "https://tokens.bd/v1/chat/completions"
+    assert seen["authorization"] == "Bearer secret-token"
+    assert seen["payload"] == {
+        "model": "deepseek-4.1-flash",
+        "messages": [
+            {"role": "system", "content": "derive carefully"},
+            {"role": "user", "content": "derive"},
+            {"role": "assistant", "content": "audit"},
+        ],
+        "temperature": 0.1,
+    }
+    assert seen["timeout"] == 180
+    assert seen["read_limit"] == 8_000_000
+
+
+def test_compatible_provider_redacts_key_from_http_error(monkeypatch):
+    from urllib.error import HTTPError
+
+    monkeypatch.setattr(
+        "amplitude_lab.llm.urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            HTTPError(
+                "https://tokens.bd/v1/chat/completions",
+                401,
+                "Unauthorized",
+                {},
+                io.BytesIO(b"bad token secret-token"),
+            )
+        ),
+    )
+    client = OpenAICompatibleLLM("secret-token", "qwen-3.7-plus")
+    with pytest.raises(LLMError) as exc:
+        client.complete("system", [{"role": "user", "text": "prompt"}])
+    assert "401" in str(exc.value)
+    assert "secret-token" not in str(exc.value)
+
+
+def test_compatible_provider_reports_finish_reason(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            return b'{"choices":[{"finish_reason":"length"}]}'
+
+    monkeypatch.setattr("amplitude_lab.llm.urlopen", lambda *args, **kwargs: Response())
+    with pytest.raises(LLMError, match="finish reason: length"):
+        OpenAICompatibleLLM("key", "qwen-3.7-plus").complete(
+            "system", [{"role": "user", "text": "prompt"}]
+        )
 
 
 def test_sdk_error_is_scrubbed(monkeypatch):
@@ -141,4 +265,4 @@ def test_cli_unknown_task(capsys):
 
 def test_cli_agent_without_key(capsys):
     assert main(["agent", "--model", "x"]) == 2
-    assert "GEMINI_API_KEY" in capsys.readouterr().err
+    assert "OPENAI_API_KEY" in capsys.readouterr().err
