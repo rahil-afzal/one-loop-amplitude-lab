@@ -24,6 +24,7 @@ The assistant is a *proposal generator*. It has no authority.
 
 - `GEMINI_API_KEY` comes from the environment; a local `.env` is loaded only by the CLI
   assistant commands, and tests are hermetic (the key and `.env` loading are disabled).
+- `GEMINI_TIMEOUT_SECONDS` configures the request timeout in seconds for both Gemini clients.
 - `GeminiConfig.__repr__` redacts the key; SDK exceptions are caught, the key is
   replaced by `<REDACTED>`, messages are truncated, and the original exception is not
   chained (`from None`).

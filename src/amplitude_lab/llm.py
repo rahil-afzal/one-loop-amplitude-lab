@@ -57,10 +57,17 @@ class GeminiLLM:
                 load_dotenv(find_dotenv(usecwd=True))
             except ImportError:
                 pass
+        try:
+            timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "120"))
+        except ValueError as exc:
+            raise LLMError("GEMINI_TIMEOUT_SECONDS must be a number.") from exc
+        if timeout <= 0:
+            raise LLMError("GEMINI_TIMEOUT_SECONDS must be positive.")
         return cls(
             os.environ.get("GEMINI_API_KEY"),
             model or os.environ.get("GEMINI_MODEL"),
             temperature=temperature,
+            timeout=timeout,
         )
 
     def __repr__(self):

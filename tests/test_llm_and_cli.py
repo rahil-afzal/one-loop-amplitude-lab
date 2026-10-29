@@ -19,6 +19,22 @@ def test_key_not_in_repr_or_description():
     assert llm.describe()["temperature"] == 0.3 and llm.describe()["model"] == "m"
 
 
+def test_gemini_timeout_from_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", "300")
+    assert GeminiLLM.from_env(use_dotenv=False).timeout == 300
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-3"])
+def test_gemini_bad_timeout_from_env_rejected(monkeypatch, bad):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", bad)
+    with pytest.raises(LLMError, match="GEMINI_TIMEOUT_SECONDS"):
+        GeminiLLM.from_env(use_dotenv=False)
+
+
 def test_sdk_error_is_scrubbed(monkeypatch):
     genai = pytest.importorskip("google.genai")
 
