@@ -14,6 +14,7 @@ class Task:
     max_turns: int = 40
     run_timeout: float = 60.0
     eval_timeout: float = 60.0
+    derivation_prompt: str = ""
     stages: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
@@ -26,10 +27,15 @@ class Task:
         meta = json.loads((folder / "task.json").read_text(encoding="utf-8"))
         statement = (folder / "statement.md").read_text(encoding="utf-8")
         statement = statement.replace("{max_attempts}", str(meta["max_attempts"]))
+        derivation_file = folder / "derivation.md"
+        derivation_prompt = (
+            derivation_file.read_text(encoding="utf-8") if derivation_file.is_file() else ""
+        )
         return cls(
             name=meta["name"],
             suite=meta["suite"],
             statement=statement,
+            derivation_prompt=derivation_prompt,
             max_attempts=meta["max_attempts"],
             max_turns=meta["max_turns"],
             run_timeout=meta["run_timeout"],

@@ -4,6 +4,7 @@ import sys
 from . import reference
 from .agent import run_agent
 from .candidate import Candidate
+from .derivation import run_derivation
 from .llm import GeminiLLM, LLMError
 from .task import Task
 from .verify import verify
@@ -18,7 +19,14 @@ def _print_report(report, details):
 
 
 def cmd_task(args):
-    print(Task.load(args.task).statement)
+    task = Task.load(args.task)
+    if args.analytical:
+        if not task.derivation_prompt:
+            print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
+            return 2
+        print(task.derivation_prompt)
+    else:
+        print(task.statement)
     return 0
 
 
@@ -66,12 +74,39 @@ def cmd_agent(args):
     return 0 if result.solved else 1
 
 
+def cmd_derive(args):
+    task = Task.load(args.task)
+    if not task.derivation_prompt:
+        print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
+        return 2
+    try:
+        llm = GeminiLLM.from_env(model=args.model, temperature=args.temperature)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"task {task.name}, model {llm.name}; deriving and then requesting a separate model audit"
+    )
+    result = run_derivation(task, llm, runs_dir=args.runs_dir, echo=print)
+    minutes, seconds = divmod(int(result.elapsed_seconds), 60)
+    elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+    print(f"derivation workflow {result.status}; elapsed {elapsed_text}")
+    print(f"report: {result.run_dir}\\result.md")
+    if result.error:
+        return 1
+    print("Both model responses were received; the result still needs independent validation.")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="amplitude-lab")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     t = sub.add_parser("task", help="print the task statement the agent sees")
     t.add_argument("--task", default="phi4_dim4")
+    t.add_argument(
+        "--analytical", action="store_true", help="print the analytical derivation prompt"
+    )
     t.set_defaults(func=cmd_task)
 
     v = sub.add_parser("verify", help="run the checks on a candidate file")
@@ -96,6 +131,15 @@ def main(argv=None):
     a.add_argument("--temperature", type=float, default=0.7)
     a.add_argument("--runs-dir", default="runs")
     a.set_defaults(func=cmd_agent)
+
+    d = sub.add_parser(
+        "derive", help="ask Gemini for an analytical amplitude and a separate model audit"
+    )
+    d.add_argument("--task", default="phi4_dim4")
+    d.add_argument("--model", default=None)
+    d.add_argument("--temperature", type=float, default=0.2)
+    d.add_argument("--runs-dir", default="runs")
+    d.set_defaults(func=cmd_derive)
 
     args = p.parse_args(argv)
     try:
