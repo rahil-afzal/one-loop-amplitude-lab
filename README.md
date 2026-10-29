@@ -1,158 +1,101 @@
-# amplitude-lab
+# one-loop-amplitude-lab
 
-[![CI](https://github.com/YOUR_USER/one-loop-amplitude-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USER/one-loop-amplitude-lab/actions/workflows/ci.yml)
+Can an LLM agent derive a one-loop scattering amplitude by itself, if something else checks
+the answer?
 
-An agent-assisted framework for computing and **validating** one-loop scalar scattering
-amplitudes.
+This repo is a test bed for that question. A task statement goes to the model. The model
+works in a python/sympy scratch space and submits candidate solutions. A verifier made of
+physics consistency checks (crossing, unitarity, dispersion, RG, ...) runs on each
+submission and reports which checks failed. A reference amplitude exists too, but the model
+never sees it; it backs one of the checks and is what the verifier itself was calibrated on.
 
-The system represents a well-defined scattering problem, evaluates the supported Feynman
-integral analytically and numerically, assembles the amplitude with explicit symmetry
-factors and conventions, and validates the result with independent checks: crossing
-symmetry, branch-cut behaviour, the optical theorem, unitarity cuts and dispersion
-relations. An optional Gemini assistant can propose candidate formulas, but it is never
-treated as mathematical ground truth: every proposal is parsed through a strict AST
-whitelist and verified by deterministic code.
+The first task is the four-point amplitude of a massless phi^4 scalar to one loop in MS-bar.
+It is deliberately easy: if an agent fails here, the harness is the first suspect, not the
+physics. Published results (Ye-He-Gu on one-loop positivity bounds first) will be added as
+further tasks to calibrate against.
 
-**Long-term benchmark:** the Ye–He–Gu scalar-EFT positivity paper, starting with the
-dim-4 one-loop contribution and extending to the full two-scalar EFT dispersion relation
-(see [docs/ROADMAP.md](docs/ROADMAP.md)).
+## Status
 
-## Supported scope (v0.1)
+Early. Done and tested: the verifier, the sandbox, the agent loop (against a scripted
+model), the run logs. Not done: no real model has been run yet, the Gemini wrapper has only
+been tested against a stub, and nothing has been run on Windows. The sandbox is hardened with
+audit hooks and resource limits but is not a security boundary (see docs/design.md).
 
-Two real massless scalars, dimension-4 interactions, process `phi1 phi1 -> phi1 phi1`:
+An independent review of the first version found real problems (the answer key was
+importable from the sandbox, exception text leaked the test points, the checks sampled too
+narrow a domain). These are fixed and each has a test; the review is summarised in
+docs/design.md.
 
-```
-L_int = + c4/4! phi1^4 + c42/4 phi1^2 phi2^2
+## Try it
 
-A_tree  = c4                                          (one contact diagram)
-A_1loop = (c4^2 + c42^2)/(32 pi^2) * [B(s) + B(t) + B(u)]
-B(s; mu2) = 2 - Log(-s/mu2)                           (MSbar, physical sheet)
-```
+    python -m pip install -e ".[dev]"
+    python -m pytest                     # about two minutes: many tests start fresh interpreters
 
-For real `s > 0`, `B = 2 - ln(s/mu2) + i*pi` (note `+i*pi`, from the `-i0` prescription).
-`c42 = 0` is the single-scalar phi^4 theory. The dispersion benchmark is the dim-4
-contribution `Sigma = (c4^2 + c42^2) / (64 pi^2 s0^2)` (the Eq. 3.11 subset, **not** the
-full Eq. 3.9).
+    python -m amplitude_lab task                                   # what the agent is told
+    python -m amplitude_lab selftest                               # reference, 20 random seeds
+    python -m amplitude_lab verify examples/candidates/correct.py
+    python -m amplitude_lab verify examples/candidates/wrong_factor.py --details
 
-**Not supported** (and listed in every report): dim-6/dim-8 operators, massive
-propagators, triangles, boxes, tensor numerators, spins, UV-pole/counterterm matching.
-Full conventions: [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
+`examples/candidates/` has one right solution and a handful of wrong ones (forgotten
+symmetry factor, missing channel, wrong finite constant, ...). The tests check that each
+wrong one trips the checks it should.
 
-## Install
+To let a model loose on the task:
 
-Windows PowerShell (conda):
+    python -m pip install -e ".[gemini]"
+    cp .env.example .env        # set GEMINI_API_KEY and GEMINI_MODEL
+    python -m amplitude_lab agent
 
-```powershell
-conda create --name amplitude-lab python=3.11 --yes
-conda activate amplitude-lab
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"          # physics core + tests, no Gemini needed
-python -m pip install -e ".[dev,gemini]"   # add this only if you want the Gemini assistant
-```
+Each run writes `runs/<timestamp>-phi4_dim4/`: `meta.json` (task, statement hash, model and
+temperature, library versions), every submission (`attempt_NN.py`), the verifier's results
+with numbers and seed (`attempts.jsonl`), one row per turn (`events.jsonl`, including how
+often the model used `run` blocks), the transcript and `outcome.json`.
 
-Linux / macOS: the same `pip` commands in any virtual environment.
+For a run that matters, keep the answer key out of reach: create an interpreter that has only
+sympy and mpmath (`python -m venv sandbox-env && sandbox-env/bin/pip install sympy mpmath`) and
+point `AMPLITUDE_LAB_SANDBOX_PYTHON` at it, ideally inside a container.
 
-## Use
+## How a submission is judged
 
-```powershell
-python -m pytest                                  # offline, no key, no network
-python -m amplitude_lab run                       # benchmark + reports in reports/
-python -m amplitude_lab validate                  # checks only, as a table
-python -m amplitude_lab list-checks               # what each check proves
-python -m amplitude_lab amplitude --s 5 --t -2    # evaluate the amplitude
-python -m amplitude_lab describe                  # conventions as JSON
-```
+The model submits a python file with `amplitude(s, t, u, c4, mu2)`. The verifier evaluates it
+at random complex points (wide ranges of scale and `mu2`, couplings of both signs, a fresh
+seed for every submission, recorded in the log) and sees the candidate through nothing but
+its values. The model is told which checks failed and gets a short fixed hint. It is never
+shown numbers; if the file crashes it sees the exception type and the line, not the message,
+because the message can quote the test points. If everything passes except the comparison
+with the reference, the hint says so, and names both possible causes (a finite constant,
+or numerical accuracy).
 
-Built-in problems: `yhg_dim4` (default, `c4=0.7`, `c42=0.4`) and `pure_phi4`. Pass
-`--problem path/to/problem.json` for your own (see `benchmarks/`).
+A run reports two outcomes separately: every structural check passed, and everything passed
+including the reference.
 
-Python API:
-
-```python
-from amplitude_lab import benchmarks
-from amplitude_lab.amplitude import assemble
-from amplitude_lab.kinematics import Kinematics
-from amplitude_lab.validation import run_all
-
-problem = benchmarks.yhg_dim4()
-print(assemble(problem, Kinematics.from_s_t(5.0, -2.0)).total)
-print([r.name for r in run_all(problem) if not r.passed])  # [] when everything passes
-```
-
-Exit codes: `0` success, `1` validation failure, `2` configuration or input error.
-
-## What the checks prove
-
-Every check is labelled with the strongest claim it may make:
-
-| Evidence | Meaning |
-|---|---|
-| `implementation` | two evaluations of the same definition agree |
-| `consistency` | the assembled amplitude satisfies internal identities |
-| `reference` | agreement with an externally stated formula (paper or textbook) |
-| `independent` | obtained by a genuinely different route |
-
-The `independent` checks are the ones that can catch a wrong normalization, sign or
-symmetry factor: brute-force **Wick-contraction counting** (tree coefficient 1, bubble
-1/2), a **4D momentum-space** integral, the **optical theorem** and **unitarity cut**
-computed from tree amplitudes and phase space only, and a **dispersion relation** that
-links the unitarity cut to the real part. The test suite also contains **negative
-controls**: it sabotages the physics (wrong prefactor, `-i*pi`, tree summed over three
-channels, wrong beta function, dropped phi2 loop) and asserts that the suite fails.
-Details and honest limits: [docs/VALIDATION.md](docs/VALIDATION.md).
-
-## Optional Gemini assistant
-
-```powershell
-Copy-Item .env.example .env        # then edit .env locally; never commit it
-python -m amplitude_lab run --assistant gemini
-python -m amplitude_lab smoke      # one real request, run manually
-```
-
-Offline demos need no key: `--assistant mock-correct`, `mock-wrong_sign`,
-`mock-wrong_branch`, `mock-explicit_ipi`, `mock-malicious`, `mock-garbage`.
-
-The assistant is asked for a closed form of the bubble. The reply is parsed by an AST
-whitelist (never executed), then compared with the deterministic Feynman-parameter
-integral at points off the cut plus boundary points that fix the physical sheet. A
-`verified` status means a finite-sample test passed; it is not a proof, and **the
-assistant can never change the overall pass/fail status**. See
-[docs/ASSISTANT.md](docs/ASSISTANT.md).
-
-> The `google-genai` call pattern in `assistant/client.py` was inspected against
-> google-genai 2.33.0, but model IDs and live behaviour were **not** verified. Check
-> <https://ai.google.dev/gemini-api/docs> and set `GEMINI_MODEL` yourself.
-
-Credentials: `.env` is git-ignored, `GeminiConfig` redacts the key in `repr`, SDK errors
-are sanitized before they reach logs or reports. Check with `git check-ignore -v .env`.
-If a key was ever committed, rotate it and purge history (`git filter-repo` or BFG);
-deleting the file in a new commit is not enough.
+The checks can't pin down everything: crossing, unitarity, the dispersion relation and RG
+fix the logarithms and the imaginary part, not the scheme-dependent constant. That is what
+`reference_match` is for. More in docs/design.md.
 
 ## Layout
 
-```
-src/amplitude_lab/
-  conventions.py     single source of truth for signs and normalizations
-  kinematics.py      massless (s, t, u), crossing permutations, physical points
-  problem.py         validated ProblemSpec (invalid specs cannot be constructed)
-  integrals/         bubble (analytic, scipy, mpmath), momentum-space route, spec
-  combinatorics.py   Wick-contraction enumeration (symmetry factors)
-  amplitude.py       tree + one-loop assembly
-  crosssection.py    tree cross sections, two-body phase space, unitarity cut
-  dispersion.py      Sigma benchmark routes, bubble dispersion relation
-  validation/        registry of checks with evidence kinds
-  assistant/         optional LLM client, safe parser, tasks, verifier
-  reporting.py, pipeline.py, cli.py
-tests/               unit tests, negative controls, security tests
-docs/                conventions, validation, assistant, roadmap
-benchmarks/          problem definitions (JSON)
-```
+    src/amplitude_lab/
+      tasks/phi4_dim4/   statement.md (what the agent sees) and task.json
+      checks.py          the consistency checks
+      verify.py          runs them, builds the feedback
+      candidate.py       loads a submission, in-process or in a subprocess
+      sandbox.py         subprocess runner: import limits, audit hook, resource limits
+      agent.py           the turn loop
+      llm.py             Gemini client and a scripted one for tests
+      log.py             run directories
+      physics.py         tree-level inputs (phase space, beta coefficient)
+      reference.py       the answer key
+    examples/candidates/ right and wrong solutions
+    tests/
 
-## Development
+## To do
 
-```powershell
-ruff check . ; ruff format --check .
-python -m pytest --cov
-```
+- second task with derivative interactions (dim-6) once the paper is in
+- `physics.py` hard-codes the single-scalar tree data; for new models it has to come from
+  the task spec
+- real runs: several seeds per task, with and without feedback
+- test the sandbox on Windows; run agents in a container
+- an independent route for new tasks (FeynCalc or Package-X) to catch typos in a reference
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under MIT.
+MIT licensed.

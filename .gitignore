@@ -1,35 +1,18 @@
-# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
 build/
 dist/
-
-# Environments
 .venv/
 venv/
-env/
+.pytest_cache/
+.ruff_cache/
+.coverage
 
-# Credentials: never commit real keys
+# agent runs (attempt logs, transcripts)
+runs/
+
+# secrets
 .env
 .env.*
 !.env.example
-*.key
-secrets/
-
-# Tool caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Generated reports
-reports/
-
-# Editor / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db

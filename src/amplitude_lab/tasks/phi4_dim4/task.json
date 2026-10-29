@@ -1,0 +1,8 @@
+{
+  "name": "phi4_dim4",
+  "suite": "phi4_dim4",
+  "max_attempts": 10,
+  "max_turns": 40,
+  "run_timeout": 60,
+  "eval_timeout": 60
+}

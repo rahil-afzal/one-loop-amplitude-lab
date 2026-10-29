@@ -5,28 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "amplitude-lab"
 dynamic = ["version"]
-description = "Agent-assisted, deterministically validated one-loop scalar scattering amplitudes"
+description = "Test bed for LLM agents deriving one-loop scattering amplitudes, with physics checks as the judge"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "amplitude-lab contributors" }]
-keywords = ["quantum field theory", "scattering amplitudes", "one-loop", "positivity", "EFT"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Topic :: Scientific/Engineering :: Physics",
-]
-dependencies = [
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "sympy>=1.12",
-    "mpmath>=1.3",
-]
+dependencies = ["sympy>=1.12", "mpmath>=1.3"]
 
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0.0", "python-dotenv>=1.0"]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.5"]
+dev = ["pytest>=7.0", "scipy>=1.10", "ruff>=0.5"]
 
 [project.scripts]
 amplitude-lab = "amplitude_lab.cli:main"
@@ -38,24 +24,15 @@ version = { attr = "amplitude_lab.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-amplitude_lab = ["py.typed"]
+amplitude_lab = ["py.typed", "tasks/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
-markers = [
-    "gemini: makes a real network request; opt in with RUN_GEMINI_SMOKE=1",
-    "slow: slower numerical checks",
-]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
-
-[tool.coverage.run]
-source = ["amplitude_lab"]
+select = ["E", "F", "I", "B"]
