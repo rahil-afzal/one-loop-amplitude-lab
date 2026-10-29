@@ -115,7 +115,7 @@ def test_model_and_timeout_configurable(monkeypatch):
     assert config.model == "some-other-model" and config.timeout_seconds == 12.5
 
 
-@pytest.mark.parametrize("bad", ["abc", "0", "-3"])
+@pytest.mark.parametrize("bad", ["abc", "0", "-3", "nan", "inf", "-inf"])
 def test_bad_timeout_rejected(monkeypatch, bad):
     monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", bad)
     with pytest.raises(AssistantConfigError):

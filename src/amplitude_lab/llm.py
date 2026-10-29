@@ -1,3 +1,4 @@
+import math
 import os
 
 
@@ -84,8 +85,8 @@ class GeminiLLM:
             timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "120"))
         except ValueError as exc:
             raise LLMError("GEMINI_TIMEOUT_SECONDS must be a number.") from exc
-        if timeout <= 0:
-            raise LLMError("GEMINI_TIMEOUT_SECONDS must be positive.")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise LLMError("GEMINI_TIMEOUT_SECONDS must be a finite positive number.")
         return cls(
             os.environ.get("GEMINI_API_KEY"),
             model or os.environ.get("GEMINI_MODEL"),

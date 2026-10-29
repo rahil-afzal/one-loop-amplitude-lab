@@ -5,6 +5,7 @@ Loading a local ``.env`` is opt-in (``load_dotenv=True``) and needs python-doten
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -46,8 +47,8 @@ class GeminiConfig:
             timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "300"))
         except ValueError as exc:
             raise AssistantConfigError("GEMINI_TIMEOUT_SECONDS must be a number.") from exc
-        if timeout <= 0:
-            raise AssistantConfigError("GEMINI_TIMEOUT_SECONDS must be positive.")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise AssistantConfigError("GEMINI_TIMEOUT_SECONDS must be a finite positive number.")
         return cls(
             api_key=os.environ.get("GEMINI_API_KEY") or None,
             model=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),

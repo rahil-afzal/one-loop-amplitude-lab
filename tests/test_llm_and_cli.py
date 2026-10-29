@@ -26,7 +26,7 @@ def test_gemini_timeout_from_env(monkeypatch):
     assert GeminiLLM.from_env(use_dotenv=False).timeout == 300
 
 
-@pytest.mark.parametrize("bad", ["abc", "0", "-3"])
+@pytest.mark.parametrize("bad", ["abc", "0", "-3", "nan", "inf", "-inf"])
 def test_gemini_bad_timeout_from_env_rejected(monkeypatch, bad):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "m")
