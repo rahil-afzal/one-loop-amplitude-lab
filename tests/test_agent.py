@@ -19,6 +19,7 @@ def code_of(name):
 
 def small_task(**kw):
     t = Task.load("phi4_dim4")
+    t.stages = []
     for k, v in kw.items():
         setattr(t, k, v)
     return t
@@ -49,9 +50,81 @@ def test_parse_reply_counts_extra_blocks_and_keeps_inner_backticks():
 def test_task_statement():
     t = Task.load("phi4_dim4")
     assert "10 submissions" in t.statement and "{max_attempts}" not in t.statement
+    assert "stage-specific instructions" in t.statement
     for name in ("crossing", "unitarity", "dispersion", "rg_beta", "reference_match"):
         assert name in t.statement
     assert "s = (p1+p2)^2" in t.statement  # the invariants are defined
+
+
+def test_staged_agent_uses_separate_prompts_and_advances_after_runs(tmp_path, monkeypatch):
+    task = Task.load("phi4_dim4")
+
+    class PassingReport:
+        passed = True
+        structural_ok = True
+
+        def to_dict(self):
+            return {"passed": self.passed, "structural_ok": self.structural_ok}
+
+        def feedback(self, attempt, max_attempts):
+            return f"submission {attempt} passed"
+
+    monkeypatch.setattr("amplitude_lab.agent.verify", lambda candidate, suite: PassingReport())
+    llm = ScriptedLLM(
+        [
+            block("run", "print('branch check')"),
+            block("run", "print('s-channel check')"),
+            block("submit", code_of("correct")),
+        ]
+    )
+    result = run_agent(task, llm, runs_dir=tmp_path)
+    assert result.solved and result.turns == 3 and result.n_run_blocks == 2
+    first_prompt = llm.calls[0][0]["text"]
+    second_prompt = llm.calls[1][-1]["text"]
+    third_prompt = llm.calls[2][-1]["text"]
+    assert "Stage 1/3: Check conventions" in first_prompt
+    assert "Stage 2/3: Check one channel" in second_prompt
+    assert "Stage 3/3: Assemble and submit" in third_prompt
+    assert any(
+        "output:" in message["text"] for message in llm.calls[1] if message["role"] == "user"
+    )
+    events = rows(only_run(tmp_path) / "events.jsonl")
+    assert [event["kind"] for event in events] == ["run", "run", "submit"]
+    assert [event["stage"] for event in events] == [1, 2, 3]
+    meta = json.loads((only_run(tmp_path) / "meta.json").read_text())
+    assert [stage["name"] for stage in meta["stages"]] == [
+        "Check conventions",
+        "Check one channel",
+        "Assemble and submit",
+    ]
+
+
+def test_staged_agent_retries_a_failed_calculation_before_advancing(tmp_path, monkeypatch):
+    class PassingReport:
+        passed = True
+        structural_ok = True
+
+        def to_dict(self):
+            return {"passed": self.passed, "structural_ok": self.structural_ok}
+
+        def feedback(self, attempt, max_attempts):
+            return f"submission {attempt} passed"
+
+    monkeypatch.setattr("amplitude_lab.agent.verify", lambda candidate, suite: PassingReport())
+    task = Task.load("phi4_dim4")
+    llm = ScriptedLLM(
+        [
+            block("run", "raise RuntimeError('retry this stage')"),
+            block("run", "print('branch check')"),
+            block("run", "print('s-channel check')"),
+            block("submit", code_of("correct")),
+        ]
+    )
+    result = run_agent(task, llm, runs_dir=tmp_path)
+    assert result.solved and result.turns == 4
+    assert "did not complete successfully" in llm.calls[1][-1]["text"]
+    assert "Stage 1/3 (Check conventions)" in llm.calls[1][-1]["text"]
+    assert "Stage 2/3: Check one channel" in llm.calls[2][-1]["text"]
 
 
 def test_wrong_then_right(tmp_path):
@@ -81,7 +154,18 @@ def test_wrong_then_right(tmp_path):
     assert "agent (turn 1)" in (run / "transcript.md").read_text()
 
 
-def test_agent_echoes_progress_and_elapsed_time(tmp_path):
+def test_agent_echoes_progress_and_elapsed_time(tmp_path, monkeypatch):
+    class PassingReport:
+        passed = True
+        structural_ok = True
+
+        def to_dict(self):
+            return {"passed": self.passed, "structural_ok": self.structural_ok}
+
+        def feedback(self, attempt, max_attempts):
+            return f"submission {attempt} passed"
+
+    monkeypatch.setattr("amplitude_lab.agent.verify", lambda candidate, suite: PassingReport())
     progress = []
     result = run_agent(
         small_task(),

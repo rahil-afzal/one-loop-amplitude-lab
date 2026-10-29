@@ -31,6 +31,14 @@ def _format_elapsed(seconds):
     return f"{seconds}s"
 
 
+def _stage_message(stage, index, total):
+    return (
+        f"Stage {index + 1}/{total}: {stage['name']}\n\n"
+        f"{stage['instruction']}\n\n"
+        f"Reply with exactly one `{stage['expected_kind']}` block."
+    )
+
+
 @dataclass
 class AgentResult:
     solved: bool  # every check passed, including the reference
@@ -55,17 +63,29 @@ def run_agent(task, llm, runs_dir="runs", echo=None):
     def progress(message):
         say(f"{message} (elapsed: {_format_elapsed(time.monotonic() - started_at)})")
 
-    messages = [{"role": "user", "text": "Go ahead."}]
+    stages = getattr(task, "stages", [])
+    stage_index = 0
+    if stages:
+        initial_message = _stage_message(stages[stage_index], stage_index, len(stages))
+    else:
+        initial_message = "Go ahead."
+    messages = [{"role": "user", "text": initial_message}]
     res = AgentResult(False, False, 0, 0, "turn limit reached", str(log.dir))
 
     for turn in range(1, task.max_turns + 1):
         res.turns = turn
+        if stages:
+            stage = stages[stage_index]
+            progress(f"Stage {stage_index + 1}/{len(stages)}: {stage['name']}")
         t0 = time.monotonic()
         wait_done = threading.Event()
 
-        def report_wait():
-            while not wait_done.wait(10):
-                progress(f"Still waiting for the model response (turn {turn}/{task.max_turns})")
+        def report_wait(done=wait_done, current_turn=turn):
+            while not done.wait(10):
+                progress(
+                    f"Still waiting for the model response "
+                    f"(turn {current_turn}/{task.max_turns})"
+                )
 
         progress(f"Sending prompt to model (turn {turn}/{task.max_turns})")
         wait_reporter = threading.Thread(target=report_wait, daemon=True)
@@ -92,6 +112,11 @@ def run_agent(task, llm, runs_dir="runs", echo=None):
             res.n_no_block += 1
             other = OTHER_FENCE.search(reply)
             answer = "No `run` or `submit` block found. Reply with exactly one."
+            if stages:
+                answer = (
+                    f"Stage {stage_index + 1}/{len(stages)} ({stage['name']}): "
+                    f"reply with exactly one `{stage['expected_kind']}` block."
+                )
             if other:
                 answer += f" (I saw a ```{other.group(1)} block; the tag must be run or submit.)"
             log.event(turn=turn, kind="no_block", llm_s=round(llm_s, 2), reply_chars=len(reply))
@@ -101,6 +126,22 @@ def run_agent(task, llm, runs_dir="runs", echo=None):
 
         kind, code, n_blocks = parsed
         note = "\n(Only the first block was used.)" if n_blocks > 1 else ""
+        if stages and kind != stage["expected_kind"]:
+            answer = (
+                f"Stay on stage {stage_index + 1}/{len(stages)} ({stage['name']}). "
+                f"Reply with exactly one `{stage['expected_kind']}` block for this stage."
+            )
+            log.event(
+                turn=turn,
+                kind="stage_mismatch",
+                stage=stage_index + 1,
+                expected=stage["expected_kind"],
+                received=kind,
+                llm_s=round(llm_s, 2),
+            )
+            messages.append({"role": "user", "text": answer})
+            log.say("harness", answer)
+            continue
 
         if kind == "run":
             res.n_run_blocks += 1
@@ -113,14 +154,38 @@ def run_agent(task, llm, runs_dir="runs", echo=None):
             log.event(
                 turn=turn,
                 kind="run",
+                stage=stage_index + 1 if stages else None,
                 llm_s=round(llm_s, 2),
                 run_s=round(run_s, 2),
                 timed_out=result.timed_out,
+                returncode=result.returncode,
                 code_chars=len(code),
                 output_chars=len(result.output),
             )
             messages.append({"role": "user", "text": answer})
             log.say("tool", answer)
+            if stages and result.returncode != 0:
+                retry_message = (
+                    f"Stage {stage_index + 1}/{len(stages)} ({stage['name']}) did not complete "
+                    f"successfully (exit code {result.returncode}). Correct the calculation and "
+                    f"retry with one `{stage['expected_kind']}` block."
+                )
+                messages.append({"role": "user", "text": retry_message})
+                log.say("harness", retry_message)
+            elif stages and stage_index < len(stages) - 1:
+                stage_index += 1
+                next_stage = stages[stage_index]
+                stage_prompt = _stage_message(next_stage, stage_index, len(stages))
+                messages.append({"role": "user", "text": stage_prompt})
+                log.say("harness", stage_prompt)
+                progress(f"Moving to stage {stage_index + 1}/{len(stages)}: {next_stage['name']}")
+            elif stages:
+                final_reminder = (
+                    f"Stage {stage_index + 1}/{len(stages)} ({stage['name']}): "
+                    "now provide the complete candidate in one `submit` block."
+                )
+                messages.append({"role": "user", "text": final_reminder})
+                log.say("harness", final_reminder)
             continue
 
         res.attempts += 1
@@ -131,7 +196,8 @@ def run_agent(task, llm, runs_dir="runs", echo=None):
         report = verify(candidate, suite=task.suite)
         verify_s = time.monotonic() - t1
         log.record(res.attempts, code, report)
-        log.event(turn=turn, kind="submit", attempt=res.attempts, llm_s=round(llm_s, 2),
+        log.event(turn=turn, kind="submit", attempt=res.attempts,
+                  stage=stage_index + 1 if stages else None, llm_s=round(llm_s, 2),
                   verify_s=round(verify_s, 2), passed=report.passed,
                   structural_ok=report.structural_ok, code_chars=len(code))  # fmt: skip
         progress(

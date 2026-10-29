@@ -35,6 +35,11 @@ Each reply contains exactly one fenced block, tagged either `run` or `submit`.
   are told which checks failed, with a short hint. You have {max_attempts} submissions. The
   task ends when every check passes or the submissions or turns run out.
 
+The harness will send short, stage-specific instructions in separate turns. Follow the
+current stage and do not skip ahead: the first stages ask for small `run` calculations, then
+the final stage asks for a complete `submit` block. Keep each reply and each `run` output
+focused and concise. After verifier feedback, focus on the checks that failed.
+
 The checks, in the order they are reported:
 
 * crossing: A is symmetric under permutations of s, t, u

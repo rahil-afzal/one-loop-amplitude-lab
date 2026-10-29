@@ -29,6 +29,7 @@ amplitude_lab = ["py.typed", "tasks/*/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["gemini: makes a real network request to the Gemini API"]
 
 [tool.ruff]
 line-length = 100

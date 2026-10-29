@@ -4,5 +4,22 @@
   "max_attempts": 10,
   "max_turns": 40,
   "run_timeout": 60,
-  "eval_timeout": 60
+  "eval_timeout": 60,
+  "stages": [
+    {
+      "name": "Check conventions",
+      "expected_kind": "run",
+      "instruction": "Check the principal-log branch conventions for one physical positive s approached from above and for negative t and u. Use a short Python calculation and print only the three logarithm values. Do not derive or submit the amplitude."
+    },
+    {
+      "name": "Check one channel",
+      "expected_kind": "run",
+      "instruction": "Work out the one-loop bubble contribution in the s channel from the stated Feynman rules. Use a short Python calculation to check its logarithm branch and imaginary part in the physical region. Print only the coefficient and check result. Do not assemble or submit the full amplitude."
+    },
+    {
+      "name": "Assemble and submit",
+      "expected_kind": "submit",
+      "instruction": "Using the convention and one-channel results in this conversation, assemble the crossing-symmetric renormalized amplitude. Submit a complete Python implementation in one `submit` block. Keep the response focused on the code."
+    }
+  ]
 }

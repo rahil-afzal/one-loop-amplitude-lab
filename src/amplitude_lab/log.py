@@ -49,6 +49,7 @@ class RunLog:
                 "run_timeout_s": task.run_timeout,
                 "eval_timeout_s": task.eval_timeout,
             },
+            "stages": getattr(task, "stages", []),
             "llm": llm.describe() if hasattr(llm, "describe") else {"name": str(llm)},
             "environment": environment(),
         }

@@ -235,6 +235,7 @@ finish({"values": values})
 class RunResult:
     output: str
     timed_out: bool = False
+    returncode: int | None = None
 
 
 def _clip(text, limit):
@@ -268,7 +269,10 @@ def run_snippet(code, timeout=60.0, limit=4000):
             return RunResult(_clip(partial + f"\n[timed out after {timeout:g} s]", limit), True)
         except OSError as exc:
             return RunResult(f"could not start the sandbox interpreter: {exc}")
-        return RunResult(_clip(_text(done.stdout) + _text(done.stderr), limit))
+        return RunResult(
+            _clip(_text(done.stdout) + _text(done.stderr), limit),
+            returncode=done.returncode,
+        )
 
 
 def evaluate_file(path, points, timeout=60.0):

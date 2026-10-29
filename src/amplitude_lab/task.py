@@ -1,6 +1,6 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
@@ -14,6 +14,7 @@ class Task:
     max_turns: int = 40
     run_timeout: float = 60.0
     eval_timeout: float = 60.0
+    stages: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def load(cls, name_or_path="phi4_dim4"):
@@ -33,6 +34,7 @@ class Task:
             max_turns=meta["max_turns"],
             run_timeout=meta["run_timeout"],
             eval_timeout=meta["eval_timeout"],
+            stages=meta.get("stages", []),
         )
 
     @property
