@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from .errors import AssistantConfigError
 
-DEFAULT_MODEL = "gemini-2.5-flash"  # NOT live-verified: check the official model list.
+DEFAULT_MODEL = "gemini-3.8-flash"  # NOT live-verified: check the official model list.
 
 
 def load_dotenv_file() -> None:
@@ -43,7 +43,7 @@ class GeminiConfig:
         if load_dotenv:
             load_dotenv_file()
         try:
-            timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "60"))
+            timeout = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "300"))
         except ValueError as exc:
             raise AssistantConfigError("GEMINI_TIMEOUT_SECONDS must be a number.") from exc
         if timeout <= 0:
