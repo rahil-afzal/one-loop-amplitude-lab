@@ -53,7 +53,13 @@ def cmd_agent(args):
     print(f"task {task.name}, model {llm.name}")
     result = run_agent(task, llm, runs_dir=args.runs_dir, echo=print)
     state = "solved" if result.solved else "not solved"
-    print(f"{state} ({result.reason}); {result.attempts} submissions, {result.turns} turns")
+    elapsed = result.elapsed_seconds
+    minutes, seconds = divmod(int(elapsed), 60)
+    elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+    print(
+        f"{state} ({result.reason}); {result.attempts} submissions, {result.turns} turns; "
+        f"elapsed {elapsed_text}"
+    )
     if result.structural_solved and not result.solved:
         print("every structural check passed at some point; the reference match did not")
     print(f"log: {result.run_dir}")

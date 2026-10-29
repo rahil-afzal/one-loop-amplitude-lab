@@ -36,6 +36,7 @@ To let a model loose on the task:
     python -m amplitude_lab agent
 
 Each run writes `runs/<timestamp>-phi4_dim4/`: `meta.json` (task, statement hash, model and temperature, library versions), every submission (`attempt_NN.py`), the verifier's results with numbers and seed (`attempts.jsonl`), one row per turn (`events.jsonl`, including how often the model used `run` blocks), the transcript and `outcome.json`.
+The CLI prints progress for model requests, code execution and verification, with elapsed time and periodic updates while waiting for the model.
 
 For a run that matters, keep the answer key out of reach: create an interpreter that has only sympy and mpmath (`python -m venv sandbox-env && sandbox-env/bin/pip install sympy mpmath`) and point `AMPLITUDE_LAB_SANDBOX_PYTHON` at it, ideally inside a container.
 

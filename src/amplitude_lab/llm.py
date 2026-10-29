@@ -30,6 +30,29 @@ def _redact(text, secret):
     return text[:500]
 
 
+def _response_reason(response):
+    reasons = []
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(prompt_feedback, "block_reason", None)
+    if block_reason is not None:
+        label = getattr(block_reason, "name", None) or str(
+            getattr(block_reason, "value", block_reason)
+        )
+        if "unspecified" not in label.lower() and label not in ("0", ""):
+            reasons.append(f"prompt block reason: {label}")
+
+    for candidate in getattr(response, "candidates", None) or []:
+        finish_reason = getattr(candidate, "finish_reason", None)
+        if finish_reason is None:
+            continue
+        label = getattr(finish_reason, "name", None) or str(
+            getattr(finish_reason, "value", finish_reason)
+        )
+        if "unspecified" not in label.lower() and label not in ("0", ""):
+            reasons.append(f"candidate finish reason: {label}")
+    return "; ".join(reasons)
+
+
 class GeminiLLM:
     """Thin wrapper around the google-genai client (pip install -e '.[gemini]').
 
@@ -107,5 +130,11 @@ class GeminiLLM:
             # the message can echo request details, so scrub the key and drop the chain
             raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
         if not text or not text.strip():
-            raise LLMError("empty or blocked response")
+            reason = _response_reason(response)
+            detail = f" ({reason})" if reason else ""
+            raise LLMError(
+                "Gemini returned no text (empty response)"
+                + detail
+                + "; check model access, safety filtering and generation limits."
+            )
         return text

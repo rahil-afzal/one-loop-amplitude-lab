@@ -81,6 +81,21 @@ def test_wrong_then_right(tmp_path):
     assert "agent (turn 1)" in (run / "transcript.md").read_text()
 
 
+def test_agent_echoes_progress_and_elapsed_time(tmp_path):
+    progress = []
+    result = run_agent(
+        small_task(),
+        ScriptedLLM([block("submit", code_of("correct"))]),
+        runs_dir=tmp_path,
+        echo=progress.append,
+    )
+    assert result.elapsed_seconds >= 0
+    assert any("Sending prompt to model" in line and "elapsed:" in line for line in progress)
+    assert any("Model response received" in line for line in progress)
+    assert any("Checking submission" in line for line in progress)
+    assert any("Submission 1 passed" in line for line in progress)
+
+
 def test_run_directory_records_what_was_run(tmp_path):
     task = small_task()
     run_agent(task, ScriptedLLM([block("submit", code_of("correct"))]), runs_dir=tmp_path)

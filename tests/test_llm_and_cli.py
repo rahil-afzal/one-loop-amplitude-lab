@@ -88,6 +88,33 @@ def test_empty_response_is_an_error(monkeypatch):
         GeminiLLM("k", "m").complete("s", [{"role": "user", "text": "x"}])
 
 
+def test_empty_response_reports_gemini_reason(monkeypatch):
+    genai = pytest.importorskip("google.genai")
+
+    class Models:
+        def generate_content(self, **kw):
+            return type(
+                "R",
+                (),
+                {
+                    "text": None,
+                    "prompt_feedback": type("F", (), {"block_reason": "SAFETY"})(),
+                    "candidates": [
+                        type("C", (), {"finish_reason": "MAX_TOKENS"})()
+                    ],
+                },
+            )()
+
+    class Client:
+        def __init__(self, *a, **k):
+            self.models = Models()
+
+    monkeypatch.setattr(genai, "Client", Client)
+    with pytest.raises(LLMError, match="prompt block reason: SAFETY") as exc:
+        GeminiLLM("k", "m").complete("s", [{"role": "user", "text": "x"}])
+    assert "candidate finish reason: MAX_TOKENS" in str(exc.value)
+
+
 def test_cli_selftest(capsys):
     assert main(["selftest", "--seeds", "5"]) == 0
     assert "reference passed 5 of 5 seeds" in capsys.readouterr().out
