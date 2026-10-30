@@ -3,7 +3,7 @@
 A compact, testable lab for one-loop scattering amplitudes. The physics pipeline assembles
 the amplitude and checks it against independent numerical and analytic evidence. Optional
 LLM workflows either propose a bubble integral expression for safe parsing and deterministic
-verification, or produce a written derivation followed by a separate model audit.
+verification, or produce a written derivation followed by a model review.
 
 The supported benchmark is the massless two-scalar dimension-four sector at one loop in
 MS-bar. Scope and open validation items are in [docs/ROADMAP.md](docs/ROADMAP.md);
@@ -33,23 +33,32 @@ For Gemini connectivity, install `.[gemini]`, set `GEMINI_API_KEY`, then use
 
 ## Analytical derivation
 
-The separate `derive` workflow makes a derivation request and a second model-audit request.
-It stores the prompt, responses, metadata, and timings in `runs/`. The audit is model-generated,
-not an independent proof, and its text is **not** submitted to the deterministic verifier.
+The separate `derive` workflow requests fourteen focused work steps, then a final synthesis.
+Only relevant completed work is supplied to each next step in a fresh request; a second-pass
+review follows the synthesis. Prompts, step responses, metadata, and timings are stored in
+`runs/`, including completed steps if a later request fails. Both the derivation and review
+currently use `qwen/qwen-3.8-max`; the review is a second response
+from the same model, not an independent proof, and its text is **not** submitted to the
+deterministic verifier.
 
-For an OpenAI-compatible provider, install `.[openai-compatible]`, copy `.env.example` to
-`.env`, then set `OPENAI_API_KEY` and the provider's exact `LLM_MODEL` ID. The default endpoint
-is `https://tokens.bd/v1`; set `OPENAI_BASE_URL` for another compatible service. The default
-audit model is `deepseek/deepseek-v4-flash-latest`; override it with `LLM_AUDIT_MODEL` or
-`--audit-model`. Select Gemini with `LLM_PROVIDER=gemini` and the Gemini credentials.
+The fixed model ID is set in `src/amplitude_lab/cli.py`;
+`LLM_MODEL` and `LLM_AUDIT_MODEL` do not override them. Install `.[openai-compatible]`,
+copy `.env.example` to `.env`, and set `OPENAI_API_KEY`. The default endpoint is
+`https://tokens.bd/v1`; set `OPENAI_BASE_URL` for another compatible service.
 
 ```powershell
 python -m amplitude_lab task --analytical
-python -m amplitude_lab derive --model "<model-id>" --audit-model "<audit-model-id>"
+python -m amplitude_lab derive
+python -m amplitude_lab derive --timeout-seconds 300
 ```
 
-Set `LLM_TIMEOUT_SECONDS` to change API request timeouts; `GEMINI_TIMEOUT_SECONDS` remains a
-fallback for the older provider setting.
+Set `LLM_TIMEOUT_SECONDS` to tune request timeouts in `.env`; `--timeout-seconds` overrides it
+for one run. The default is 180 seconds. Set `OPENAI_STREAM=true` to consume streamed chunks
+from compatible endpoints; this can prevent idle gateway timeouts while the model is
+generating. Set it to `false` if the endpoint does not support streaming. Streaming does not
+override a provider's hard total-generation limit, so keep the client timeout longer than the
+expected request duration. This fixed-model derivation currently uses the OpenAI-compatible
+endpoint configured above.
 
 ## Project layout
 

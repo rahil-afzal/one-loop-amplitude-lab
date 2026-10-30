@@ -8,6 +8,7 @@ class LLMError(RuntimeError):
 
 DEFAULT_OPENAI_BASE_URL = "https://tokens.bd/v1"
 DEFAULT_LLM_TIMEOUT = 180.0
+DEFAULT_OPENAI_MAX_TOKENS = 2048
 
 
 class ScriptedLLM:
@@ -44,11 +45,13 @@ def _load_dotenv():
         pass
 
 
-def _timeout_from_env(default=DEFAULT_LLM_TIMEOUT):
-    raw_timeout = os.environ.get(
-        "LLM_TIMEOUT_SECONDS",
-        os.environ.get("GEMINI_TIMEOUT_SECONDS", str(default)),
-    )
+def _timeout_from_env(default=DEFAULT_LLM_TIMEOUT, timeout=None):
+    raw_timeout = timeout
+    if raw_timeout is None:
+        raw_timeout = os.environ.get(
+            "LLM_TIMEOUT_SECONDS",
+            os.environ.get("GEMINI_TIMEOUT_SECONDS", str(default)),
+        )
     try:
         timeout = float(raw_timeout)
     except ValueError as exc:
@@ -56,6 +59,18 @@ def _timeout_from_env(default=DEFAULT_LLM_TIMEOUT):
     if not math.isfinite(timeout) or timeout <= 0:
         raise LLMError("LLM_TIMEOUT_SECONDS must be a finite positive number.")
     return timeout
+
+
+def _bool_from_env(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise LLMError(f"{name} must be a boolean (true/false).")
 
 
 class OpenAICompatibleLLM:
@@ -68,6 +83,7 @@ class OpenAICompatibleLLM:
         base_url=DEFAULT_OPENAI_BASE_URL,
         temperature=0.2,
         timeout=DEFAULT_LLM_TIMEOUT,
+        stream=False,
     ):
         if not api_key:
             raise LLMError("OPENAI_API_KEY is not set.")
@@ -80,10 +96,11 @@ class OpenAICompatibleLLM:
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
         self.timeout = timeout
+        self.stream = stream
         self.name = f"openai-compatible:{model}"
 
     @classmethod
-    def from_env(cls, model=None, temperature=0.2, use_dotenv=True):
+    def from_env(cls, model=None, temperature=0.2, timeout=None, use_dotenv=True):
         if use_dotenv:
             _load_dotenv()
         return cls(
@@ -91,7 +108,8 @@ class OpenAICompatibleLLM:
             model or os.environ.get("LLM_MODEL"),
             base_url=os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
             temperature=temperature,
-            timeout=_timeout_from_env(),
+            timeout=_timeout_from_env(timeout=timeout),
+            stream=_bool_from_env("OPENAI_STREAM"),
         )
 
     def __repr__(self):
@@ -108,6 +126,7 @@ class OpenAICompatibleLLM:
             "base_url": self.base_url,
             "temperature": self.temperature,
             "timeout_s": self.timeout,
+            "stream": self.stream,
         }
 
     def complete(self, system, messages):
@@ -119,6 +138,7 @@ class OpenAICompatibleLLM:
                 "-e '.[openai-compatible]'."
             ) from None
 
+        finish_reason = None
         try:
             client = OpenAI(
                 api_key=self._key,
@@ -131,22 +151,50 @@ class OpenAICompatibleLLM:
                 messages=[{"role": "system", "content": system}]
                 + [{"role": message["role"], "content": message["text"]} for message in messages],
                 temperature=self.temperature,
+                max_tokens=DEFAULT_OPENAI_MAX_TOKENS,
+                stream=self.stream,
             )
+            if self.stream:
+                content_parts = []
+                finish_reason = None
+                try:
+                    for chunk in response:
+                        choices = getattr(chunk, "choices", None) or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                        delta = getattr(choice, "delta", None)
+                        content = getattr(delta, "content", None)
+                        if isinstance(content, str):
+                            content_parts.append(content)
+                        elif isinstance(content, list):
+                            content_parts.extend(
+                                getattr(part, "text", "")
+                                for part in content
+                                if getattr(part, "type", None) == "text"
+                            )
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+                content = "".join(content_parts)
+            else:
+                choices = getattr(response, "choices", None) or []
+                choice = choices[0] if choices else None
+                finish_reason = getattr(choice, "finish_reason", None)
+                message = getattr(choice, "message", None)
+                content = getattr(message, "content", None)
+                if isinstance(content, list):
+                    content = "".join(
+                        getattr(part, "text", "")
+                        for part in content
+                        if getattr(part, "type", None) == "text"
+                    )
         except Exception as exc:
             raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
 
-        choices = getattr(response, "choices", None) or []
-        choice = choices[0] if choices else None
-        message = getattr(choice, "message", None)
-        content = getattr(message, "content", None)
-        if isinstance(content, list):
-            content = "".join(
-                getattr(part, "text", "")
-                for part in content
-                if getattr(part, "type", None) == "text"
-            )
         if not isinstance(content, str) or not content.strip():
-            finish_reason = getattr(choice, "finish_reason", None)
             detail = f" (finish reason: {finish_reason})" if finish_reason else ""
             raise LLMError(
                 "Chat API returned an empty assistant message"
@@ -156,15 +204,19 @@ class OpenAICompatibleLLM:
         return content.strip()
 
 
-def llm_from_env(provider=None, model=None, temperature=0.2, use_dotenv=True):
+def llm_from_env(provider=None, model=None, temperature=0.2, timeout=None, use_dotenv=True):
     """Create the configured API client; OpenAI-compatible is the default provider."""
     if use_dotenv:
         _load_dotenv()
     selected = (provider or os.environ.get("LLM_PROVIDER", "openai-compatible")).lower()
     if selected in ("openai-compatible", "openai_compatible"):
-        return OpenAICompatibleLLM.from_env(model=model, temperature=temperature, use_dotenv=False)
+        return OpenAICompatibleLLM.from_env(
+            model=model, temperature=temperature, timeout=timeout, use_dotenv=False
+        )
     if selected == "gemini":
-        return GeminiLLM.from_env(model=model, temperature=temperature, use_dotenv=False)
+        return GeminiLLM.from_env(
+            model=model, temperature=temperature, timeout=timeout, use_dotenv=False
+        )
     raise LLMError(f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible' or 'gemini'.")
 
 
@@ -210,10 +262,10 @@ class GeminiLLM:
         self.name = f"gemini:{model}"
 
     @classmethod
-    def from_env(cls, model=None, temperature=0.7, use_dotenv=True):
+    def from_env(cls, model=None, temperature=0.7, timeout=None, use_dotenv=True):
         if use_dotenv:
             _load_dotenv()
-        timeout = _timeout_from_env(default=120.0)
+        timeout = _timeout_from_env(default=120.0, timeout=timeout)
         return cls(
             os.environ.get("GEMINI_API_KEY"),
             model or os.environ.get("GEMINI_MODEL"),

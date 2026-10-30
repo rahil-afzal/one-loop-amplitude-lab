@@ -57,8 +57,27 @@ def test_compatible_provider_config_from_env(monkeypatch):
     assert client.model == "qwen/qwen-3.7-plus"
     assert client.base_url == "https://tokens.bd/v1"
     assert client.timeout == 180
+    assert client.stream is False
     assert "gateway-secret" not in repr(client)
     assert "gateway-secret" not in str(client.describe())
+
+
+def test_explicit_timeout_overrides_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "model")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "90")
+
+    client = OpenAICompatibleLLM.from_env(timeout=45, use_dotenv=False)
+
+    assert client.timeout == 45
+
+
+def test_invalid_explicit_timeout_is_rejected(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "model")
+
+    with pytest.raises(LLMError, match="finite positive number"):
+        OpenAICompatibleLLM.from_env(timeout=0, use_dotenv=False)
 
 
 def test_compatible_provider_requires_api_key_and_model(monkeypatch):
@@ -112,7 +131,99 @@ def test_compatible_provider_request_shape(monkeypatch):
             {"role": "assistant", "content": "audit"},
         ],
         "temperature": 0.1,
+        "max_tokens": 2048,
+        "stream": False,
     }
+
+
+def test_compatible_provider_streaming_joins_content_and_closes_stream(monkeypatch):
+    seen = {}
+
+    class Completions:
+        def create(self, **kwargs):
+            seen["request"] = kwargs
+            return iter(
+                [
+                    types.SimpleNamespace(
+                        choices=[
+                            types.SimpleNamespace(
+                                delta=types.SimpleNamespace(content="derived "),
+                                finish_reason=None,
+                            )
+                        ]
+                    ),
+                    types.SimpleNamespace(
+                        choices=[
+                            types.SimpleNamespace(
+                                delta=types.SimpleNamespace(content="result"),
+                                finish_reason=None,
+                            )
+                        ]
+                    ),
+                    types.SimpleNamespace(
+                        choices=[
+                            types.SimpleNamespace(
+                                delta=types.SimpleNamespace(content=None),
+                                finish_reason="stop",
+                            )
+                        ]
+                    ),
+                ]
+            )
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
+    client = OpenAICompatibleLLM("secret-token", "provider/model", stream=True)
+
+    result = client.complete("system", [{"role": "user", "text": "prompt"}])
+
+    assert result == "derived result"
+    assert seen["request"]["stream"] is True
+    assert client.describe()["stream"] is True
+
+
+def test_compatible_provider_streaming_uses_finish_reason_for_empty_response(monkeypatch):
+    chunks = iter(
+        [
+            types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        delta=types.SimpleNamespace(content=None),
+                        finish_reason="length",
+                    )
+                ]
+            )
+        ]
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            assert kwargs["stream"] is True
+            return chunks
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
+    client = OpenAICompatibleLLM("key", "provider/model", stream=True)
+    with pytest.raises(LLMError, match="finish reason: length"):
+        client.complete("system", [{"role": "user", "text": "prompt"}])
+
+
+def test_compatible_provider_stream_setting_from_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("OPENAI_STREAM", "true")
+
+    assert OpenAICompatibleLLM.from_env(use_dotenv=False).stream is True
+
+    monkeypatch.setenv("OPENAI_STREAM", "sometimes")
+    with pytest.raises(LLMError, match="OPENAI_STREAM must be a boolean"):
+        OpenAICompatibleLLM.from_env(use_dotenv=False)
 
 
 def test_compatible_provider_redacts_key_from_sdk_error(monkeypatch):

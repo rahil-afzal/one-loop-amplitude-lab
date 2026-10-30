@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +26,8 @@ from .reporting import write_json, write_markdown
 from .task import Task
 from .validation import list_checks, run_all
 
-DEFAULT_AUDIT_MODEL = "deepseek/deepseek-v4-flash-latest"
+DERIVATION_MODEL = "anthropic/claude-opus-5-5"
+AUDIT_MODEL = "anthropic/claude-opus-5-5"
 
 
 def _assistant_from_name(name):
@@ -132,20 +132,17 @@ def cmd_derive(args):
         print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
         return 2
     try:
-        llm = llm_from_env(provider=args.provider, model=args.model, temperature=args.temperature)
-        selected_provider = args.provider or os.environ.get("LLM_PROVIDER", "openai-compatible")
-        audit_model = args.audit_model or os.environ.get("LLM_AUDIT_MODEL")
-        if not audit_model and selected_provider in (
-            "openai-compatible",
-            "openai_compatible",
-        ):
-            audit_model = DEFAULT_AUDIT_MODEL
-        audit_llm = (
-            llm_from_env(
-                provider=selected_provider, model=audit_model, temperature=args.temperature
-            )
-            if audit_model
-            else llm
+        llm = llm_from_env(
+            provider="openai-compatible",
+            model=DERIVATION_MODEL,
+            temperature=args.temperature,
+            timeout=args.timeout_seconds,
+        )
+        audit_llm = llm_from_env(
+            provider="openai-compatible",
+            model=AUDIT_MODEL,
+            temperature=args.temperature,
+            timeout=args.timeout_seconds,
         )
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -159,7 +156,10 @@ def cmd_derive(args):
     print(f"report: {Path(result.run_dir) / 'result.md'}")
     if result.error:
         return 1
-    print("Both model responses were received; the result still needs independent validation.")
+    print(
+        "All derivation steps and the audit response were received; "
+        "independently validate the result."
+    )
     return 0
 
 
@@ -199,12 +199,17 @@ def main(argv=None):
     task.add_argument("--analytical", action="store_true", help=argparse.SUPPRESS)
     task.set_defaults(func=cmd_task)
 
-    derive = sub.add_parser("derive", help="derive an amplitude and request a separate model audit")
+    derive = sub.add_parser(
+        "derive", help="derive an amplitude and request a second-pass model review"
+    )
     derive.add_argument("--task", default="phi4_dim4")
-    derive.add_argument("--model", default=None)
-    derive.add_argument("--audit-model", default=None, help="model ID for the audit request")
-    derive.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
     derive.add_argument("--temperature", type=float, default=0.2)
+    derive.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="request timeout; overrides LLM_TIMEOUT_SECONDS",
+    )
     derive.add_argument("--runs-dir", default="runs")
     derive.set_defaults(func=cmd_derive)
 
