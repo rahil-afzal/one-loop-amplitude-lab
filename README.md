@@ -1,109 +1,63 @@
 # one-loop-amplitude-lab
 
-Can an LLM agent derive a one-loop scattering amplitude by itself, if something else checks the answer?
+A compact, testable lab for one-loop scattering amplitudes. The physics pipeline assembles
+the amplitude and checks it against independent numerical and analytic evidence. Optional
+LLM workflows either propose a bubble integral expression for safe parsing and deterministic
+verification, or produce a written derivation followed by a separate model audit.
 
-This repo is a test bed for that question. It provides two workflows: an analytical derivation and separate model-audit report, and a legacy code-submission agent with deterministic physics checks. The derivation workflow saves a Markdown/LaTeX report; the code workflow has the model submit candidate solutions that are checked for crossing, unitarity, dispersion, RG behavior, and reference agreement.
+The supported benchmark is the massless two-scalar dimension-four sector at one loop in
+MS-bar. Scope and open validation items are in [docs/ROADMAP.md](docs/ROADMAP.md);
+physics conventions are in [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
 
-The first task is the four-point amplitude of a massless phi^4 scalar to one loop in MS-bar. It is deliberately easy: if an agent fails here, the harness is the first suspect, not the physics. Published results (Ye-He-Gu on one-loop positivity bounds first) will be added as further tasks to calibrate against.
+## Install and test
 
-## Status
+```powershell
+python -m pip install -e ".[dev]"
+python -m pytest
+```
 
-Early. The deterministic verifier, legacy code-agent loop, and analytical-report workflow have
-focused tests. A live Gemini smoke test returned successfully, but full model derivation calls
-have encountered service-capacity and deadline errors; no analytical amplitude from a real model
-has completed review yet. The sandbox is hardened with audit hooks and resource limits but is
-not a security boundary (see docs/design.md); Windows sandbox candidate execution still needs
-reliable validation.
+The deterministic workflow and tests run offline:
 
-An independent review of the first version found real problems (the answer key was
-importable from the sandbox, exception text leaked the test points, the checks sampled too narrow a domain). These are fixed and each has a test; the review is summarised in
-docs/design.md.
+```powershell
+python -m amplitude_lab run --problem pure_phi4 --out-dir runs/pure-phi4
+python -m amplitude_lab validate --problem yhg_dim4
+python -m amplitude_lab amplitude --problem pure_phi4 --s 5 --t -2
+python -m amplitude_lab list-checks
+python examples/quickstart.py
+```
 
-## Try it
+`run` writes JSON and Markdown reports. To include a no-network assistant example, use
+`--assistant mock-correct`; mock outputs never affect the deterministic overall status.
+For Gemini connectivity, install `.[gemini]`, set `GEMINI_API_KEY`, then use
+`python -m amplitude_lab smoke` or `run --assistant gemini`.
 
-    python -m pip install -e ".[dev]"
-    python -m pytest                     # about two minutes: many tests start fresh interpreters
+## Analytical derivation
 
-    python -m amplitude_lab task                                   # code-agent task
-    python -m amplitude_lab task --analytical                      # analytical derivation prompt
-    python -m amplitude_lab selftest                               # reference, 20 random seeds
-    python -m amplitude_lab verify examples/candidates/correct.py
-    python -m amplitude_lab verify examples/candidates/wrong_factor.py --details
+The separate `derive` workflow makes a derivation request and a second model-audit request.
+It stores the prompt, responses, metadata, and timings in `runs/`. The audit is model-generated,
+not an independent proof, and its text is **not** submitted to the deterministic verifier.
 
-`examples/candidates/` has one right solution and a handful of wrong ones (forgotten
-symmetry factor, missing channel, wrong finite constant, ...). The tests check that each
-wrong one trips the checks it should.
+For an OpenAI-compatible provider, install `.[openai-compatible]`, copy `.env.example` to
+`.env`, then set `OPENAI_API_KEY` and the provider's exact `LLM_MODEL` ID. The default endpoint
+is `https://tokens.bd/v1`; set `OPENAI_BASE_URL` for another compatible service. The default
+audit model is `deepseek/deepseek-v4-flash-latest`; override it with `LLM_AUDIT_MODEL` or
+`--audit-model`. Select Gemini with `LLM_PROVIDER=gemini` and the Gemini credentials.
 
-To let a model loose on the task:
+```powershell
+python -m amplitude_lab task --analytical
+python -m amplitude_lab derive --model "<model-id>" --audit-model "<audit-model-id>"
+```
 
-    python -m pip install -e ".[openai-compatible]"
-    cp .env.example .env        # set OPENAI_API_KEY and the provider's exact LLM_MODEL ID
-    python -m amplitude_lab derive
+Set `LLM_TIMEOUT_SECONDS` to change API request timeouts; `GEMINI_TIMEOUT_SECONDS` remains a
+fallback for the older provider setting.
 
-The recommended `derive` workflow makes two API requests through the configured
-OpenAI-compatible endpoint at `https://tokens.bd/v1`: one for a convention-explicit
-analytical derivation, followed by a separate model audit of the result. It writes `result.md`,
-`prompt.md`, `transcript.md`, request metadata, and timing under `runs/<timestamp>-phi4_dim4-derivation/`.
-The audit is still generated by an AI model and is not an independent proof; check the formula
-against trusted references or an independent calculation. This workflow does not execute or
-deterministically verify the returned formula.
+## Project layout
 
-Set `LLM_MODEL` to the exact model ID exposed by your API account for Qwen 3.7 Plus,
-DeepSeek 4.1 Flash, or GPT Luma 6. The example value is only a suggested ID; gateway catalogs
-may use different spellings. Switch derivation models with `--model "<exact-model-id>"`.
-By default the same model audits its derivation; use `--audit-model "<different-model-id>"`
-to get the second response from another available model, for example:
+- `src/amplitude_lab/`: physics model, integral implementations, deterministic validation,
+  optional proposal assistant, reporting, and CLI.
+- `src/amplitude_lab/tasks/`: analytical task prompts.
+- `examples/quickstart.py`: offline end-to-end example.
+- `tests/`: physics, validation, assistant, CLI, and provider tests.
+- `docs/`: conventions, validation evidence, assistant trust model, design, and roadmap.
 
-    python -m amplitude_lab derive --model "<qwen-id>" --audit-model "<deepseek-id>"
-    python -m amplitude_lab derive --model "<gpt-luma-id>" --audit-model "<qwen-id>"
-
-Set `LLM_PROVIDER=gemini` and the Gemini credentials to use the retained Gemini client instead.
-`LLM_TIMEOUT_SECONDS` controls request timeouts; the older `GEMINI_TIMEOUT_SECONDS` remains a
-fallback.
-
-The older code-generation loop remains available separately with `python -m amplitude_lab agent`;
-it uses the same configured provider and model.
-
-Each run writes `runs/<timestamp>-phi4_dim4/`: `meta.json` (task, statement hash, model and temperature, library versions), every submission (`attempt_NN.py`), the verifier's results with numbers and seed (`attempts.jsonl`), one row per turn (`events.jsonl`, including how often the model used `run` blocks), the transcript and `outcome.json`.
-The CLI prints progress for model requests, code execution and verification, with elapsed time and periodic updates while waiting for the model. The phi4 code agent makes two focused API turns for convention and one-channel checks, then a separate turn for the complete submission; this uses more requests and may increase total latency and API usage.
-
-For a run that matters, keep the answer key out of reach: create an interpreter that has only sympy and mpmath (`python -m venv sandbox-env && sandbox-env/bin/pip install sympy mpmath`) and point `AMPLITUDE_LAB_SANDBOX_PYTHON` at it, ideally inside a container.
-
-## How a submission is judged
-
-The model submits a python file with `amplitude(s, t, u, c4, mu2)`. The verifier evaluates it at random complex points (wide ranges of scale and `mu2`, couplings of both signs, a fresh seed for every submission, recorded in the log) and sees the candidate through nothing but
-its values. The model is told which checks failed and gets a short fixed hint. It is never shown numbers; if the file crashes it sees the exception type and the line, not the message, because the message can quote the test points. If everything passes except the comparison with the reference, the hint says so, and names both possible causes (a finite constant, or numerical accuracy).
-
-A run reports two outcomes separately: every structural check passed, and everything passed
-including the reference.
-
-The checks can't pin down everything: crossing, unitarity, the dispersion relation and RG
-fix the logarithms and the imaginary part, not the scheme-dependent constant. That is what
-`reference_match` is for. More in docs/design.md.
-
-## Layout
-
-    src/amplitude_lab/
-      tasks/phi4_dim4/   statement.md (what the agent sees) and task.json
-      checks.py          the consistency checks
-      verify.py          runs them, builds the feedback
-      candidate.py       loads a submission, in-process or in a subprocess
-      sandbox.py         subprocess runner: import limits, audit hook, resource limits
-      agent.py           the turn loop
-      llm.py             Gemini client and a scripted one for tests
-      log.py             run directories
-      physics.py         tree-level inputs (phase space, beta coefficient)
-      reference.py       the answer key
-    examples/candidates/ right and wrong solutions
-    tests/
-
-## To do
-
-- second task with derivative interactions (dim-6) once the paper is in
-- `physics.py` hard-codes the single-scalar tree data; for new models it has to come from
-  the task spec
-- real runs: several seeds per task, with and without feedback
-- test the sandbox on Windows; run agents in a container
-- an independent route for new tasks (FeynCalc or Package-X) to catch typos in a reference
-
-MIT licensed.
+Runs and generated reports are local outputs and are ignored by Git.

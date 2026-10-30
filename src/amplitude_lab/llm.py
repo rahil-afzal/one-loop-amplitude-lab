@@ -1,8 +1,5 @@
-import json
 import math
 import os
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 
 class LLMError(RuntimeError):
@@ -114,61 +111,48 @@ class OpenAICompatibleLLM:
         }
 
     def complete(self, system, messages):
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}]
-            + [{"role": message["role"], "content": message["text"]} for message in messages],
-            "temperature": self.temperature,
-        }
-        request = Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read(8_000_000)
-        except HTTPError as exc:
-            detail = exc.read(2000).decode("utf-8", "replace")
+            from openai import OpenAI
+        except ImportError:
             raise LLMError(
-                f"Chat API returned HTTP {exc.code}: {_redact(detail, self._key)}"
-            ) from None
-        except (URLError, TimeoutError, OSError) as exc:
-            raise LLMError(_redact(f"Chat API request failed: {exc}", self._key)) from None
-
-        try:
-            data = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LLMError(f"Chat API returned invalid JSON: {type(exc).__name__}.") from None
-        if not isinstance(data, dict):
-            raise LLMError("Chat API returned an unexpected response shape.")
-        if "error" in data:
-            raise LLMError(f"Chat API error: {_redact(str(data['error']), self._key)}")
-
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            finish_reason = ""
-            choices = data.get("choices")
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                finish_reason = str(choices[0].get("finish_reason") or "")
-            detail = f" (finish reason: {finish_reason})" if finish_reason else ""
-            raise LLMError(
-                "Chat API returned no assistant message"
-                + detail
-                + "; check model ID and endpoint compatibility."
+                "The OpenAI SDK is not installed. Run: python -m pip install "
+                "-e '.[openai-compatible]'."
             ) from None
 
+        try:
+            client = OpenAI(
+                api_key=self._key,
+                base_url=self.base_url,
+                timeout=self.timeout,
+                max_retries=0,
+            )
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": system}]
+                + [{"role": message["role"], "content": message["text"]} for message in messages],
+                temperature=self.temperature,
+            )
+        except Exception as exc:
+            raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
+
+        choices = getattr(response, "choices", None) or []
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
         if isinstance(content, list):
             content = "".join(
-                part.get("text", "") for part in content if isinstance(part, dict)
+                getattr(part, "text", "")
+                for part in content
+                if getattr(part, "type", None) == "text"
             )
         if not isinstance(content, str) or not content.strip():
-            raise LLMError("Chat API returned an empty assistant message.")
+            finish_reason = getattr(choice, "finish_reason", None)
+            detail = f" (finish reason: {finish_reason})" if finish_reason else ""
+            raise LLMError(
+                "Chat API returned an empty assistant message"
+                + detail
+                + "; check model ID and endpoint compatibility."
+            )
         return content.strip()
 
 
@@ -178,14 +162,10 @@ def llm_from_env(provider=None, model=None, temperature=0.2, use_dotenv=True):
         _load_dotenv()
     selected = (provider or os.environ.get("LLM_PROVIDER", "openai-compatible")).lower()
     if selected in ("openai-compatible", "openai_compatible"):
-        return OpenAICompatibleLLM.from_env(
-            model=model, temperature=temperature, use_dotenv=False
-        )
+        return OpenAICompatibleLLM.from_env(model=model, temperature=temperature, use_dotenv=False)
     if selected == "gemini":
         return GeminiLLM.from_env(model=model, temperature=temperature, use_dotenv=False)
-    raise LLMError(
-        f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible' or 'gemini'."
-    )
+    raise LLMError(f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible' or 'gemini'.")
 
 
 def _response_reason(response):

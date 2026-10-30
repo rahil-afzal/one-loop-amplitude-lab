@@ -37,10 +37,7 @@ def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):
     assert json.loads((run_dir / "outcome.json").read_text())["status"] == "completed"
     meta = json.loads((run_dir / "meta.json").read_text())
     assert meta["audit_llm"]["name"] == "scripted"
-    events = [
-        json.loads(line)
-        for line in (run_dir / "events.jsonl").read_text().splitlines()
-    ]
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
     assert [event["stage"] for event in events] == ["derivation", "audit"]
 
 
@@ -91,22 +88,86 @@ def test_derive_command_uses_two_pass_flow(monkeypatch, tmp_path, capsys):
         return FakeResult()
 
     monkeypatch.setattr("amplitude_lab.cli.run_derivation", fake_run_derivation)
-    assert main(
-        [
-            "derive",
-            "--model",
-            "qwen-api-id",
-            "--audit-model",
-            "deepseek-api-id",
-            "--runs-dir",
-            str(tmp_path),
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "derive",
+                "--model",
+                "qwen-api-id",
+                "--audit-model",
+                "deepseek-api-id",
+                "--runs-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
     output = capsys.readouterr().out
     assert "audit model" in output
     assert "result.md" in output
     assert calls["task"].derivation_prompt
     assert calls["runs_dir"] == str(tmp_path)
-    assert calls["provider"] is None
+    assert calls["provider"] == "openai-compatible"
     assert calls["models"] == ["qwen-api-id", "deepseek-api-id"]
     assert calls["audit_llm"] is not calls["llm"]
+
+
+def test_derive_defaults_to_deepseek_auditor_for_openai_compatible(monkeypatch, tmp_path, capsys):
+    class FakeLLM:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeResult:
+        status = "completed"
+        elapsed_seconds = 3
+        run_dir = str(tmp_path / "run")
+        error = ""
+
+    calls = []
+
+    def fake_llm_from_env(**kwargs):
+        calls.append(kwargs)
+        return FakeLLM(kwargs["model"] or "configured-primary")
+
+    monkeypatch.setattr("amplitude_lab.cli.llm_from_env", fake_llm_from_env)
+    monkeypatch.setattr(
+        "amplitude_lab.cli.run_derivation",
+        lambda task, llm, runs_dir, echo, audit_llm: FakeResult(),
+    )
+
+    assert main(["derive", "--model", "qwen/qwen-3.7-plus"]) == 0
+    assert [call["model"] for call in calls] == [
+        "qwen/qwen-3.7-plus",
+        "deepseek/deepseek-v4-flash-latest",
+    ]
+    assert [call["provider"] for call in calls] == [None, "openai-compatible"]
+    assert "deepseek/deepseek-v4-flash-latest" in capsys.readouterr().out
+
+
+def test_derive_auditor_can_be_configured_in_environment(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("LLM_AUDIT_MODEL", "account-specific-auditor")
+    models = []
+
+    class FakeLLM:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeResult:
+        status = "completed"
+        elapsed_seconds = 3
+        run_dir = str(tmp_path / "run")
+        error = ""
+
+    def fake_llm_from_env(**kwargs):
+        models.append(kwargs["model"])
+        return FakeLLM(kwargs["model"] or "configured-primary")
+
+    monkeypatch.setattr("amplitude_lab.cli.llm_from_env", fake_llm_from_env)
+    monkeypatch.setattr(
+        "amplitude_lab.cli.run_derivation",
+        lambda task, llm, runs_dir, echo, audit_llm: FakeResult(),
+    )
+
+    assert main(["derive", "--model", "qwen/qwen-3.7-plus"]) == 0
+    assert models == ["qwen/qwen-3.7-plus", "account-specific-auditor"]
+    capsys.readouterr()

@@ -9,7 +9,7 @@ venv/
 .ruff_cache/
 .coverage
 
-# agent runs (attempt logs, transcripts)
+# local reports, prompts and transcripts
 runs/
 
 # secrets

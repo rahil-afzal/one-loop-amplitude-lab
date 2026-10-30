@@ -1,9 +1,8 @@
-import io
-import json
+import sys
+import types
 
 import pytest
 
-from amplitude_lab.cli import main
 from amplitude_lab.llm import (
     DEFAULT_OPENAI_BASE_URL,
     GeminiLLM,
@@ -11,8 +10,6 @@ from amplitude_lab.llm import (
     OpenAICompatibleLLM,
     llm_from_env,
 )
-
-from .conftest import CANDIDATES
 
 
 def test_gemini_needs_key_and_model():
@@ -52,12 +49,12 @@ def test_gemini_bad_timeout_from_env_rejected(monkeypatch, bad):
 
 def test_compatible_provider_config_from_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "gateway-secret")
-    monkeypatch.setenv("LLM_MODEL", "qwen-3.7-plus")
+    monkeypatch.setenv("LLM_MODEL", "qwen/qwen-3.7-plus")
     monkeypatch.setenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "180")
     client = llm_from_env(use_dotenv=False)
     assert isinstance(client, OpenAICompatibleLLM)
-    assert client.model == "qwen-3.7-plus"
+    assert client.model == "qwen/qwen-3.7-plus"
     assert client.base_url == "https://tokens.bd/v1"
     assert client.timeout == 180
     assert "gateway-secret" not in repr(client)
@@ -75,39 +72,40 @@ def test_compatible_provider_requires_api_key_and_model(monkeypatch):
 def test_compatible_provider_request_shape(monkeypatch):
     seen = {}
 
-    class Response:
-        def __enter__(self):
-            return self
+    class Completions:
+        def create(self, **kwargs):
+            seen["request"] = kwargs
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="  derived result  "),
+                        finish_reason="stop",
+                    )
+                ]
+            )
 
-        def __exit__(self, *args):
-            return False
+    class Client:
+        def __init__(self, **kwargs):
+            seen["client"] = kwargs
+            self.chat = types.SimpleNamespace(completions=Completions())
 
-        def read(self, size):
-            seen["read_limit"] = size
-            return json.dumps(
-                {"choices": [{"message": {"content": "  derived result  "}}]}
-            ).encode()
-
-    def fake_urlopen(request, timeout):
-        seen["url"] = request.full_url
-        seen["authorization"] = request.get_header("Authorization")
-        seen["payload"] = json.loads(request.data)
-        seen["timeout"] = timeout
-        return Response()
-
-    monkeypatch.setattr("amplitude_lab.llm.urlopen", fake_urlopen)
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     client = OpenAICompatibleLLM(
-        "secret-token", "deepseek-4.1-flash", temperature=0.1, timeout=180
+        "secret-token", "deepseek/deepseek-4.1-flash", temperature=0.1, timeout=180
     )
     result = client.complete(
         "derive carefully",
         [{"role": "user", "text": "derive"}, {"role": "assistant", "text": "audit"}],
     )
     assert result == "derived result"
-    assert seen["url"] == "https://tokens.bd/v1/chat/completions"
-    assert seen["authorization"] == "Bearer secret-token"
-    assert seen["payload"] == {
-        "model": "deepseek-4.1-flash",
+    assert seen["client"] == {
+        "api_key": "secret-token",
+        "base_url": "https://tokens.bd/v1",
+        "timeout": 180,
+        "max_retries": 0,
+    }
+    assert seen["request"] == {
+        "model": "deepseek/deepseek-4.1-flash",
         "messages": [
             {"role": "system", "content": "derive carefully"},
             {"role": "user", "content": "derive"},
@@ -115,44 +113,42 @@ def test_compatible_provider_request_shape(monkeypatch):
         ],
         "temperature": 0.1,
     }
-    assert seen["timeout"] == 180
-    assert seen["read_limit"] == 8_000_000
 
 
-def test_compatible_provider_redacts_key_from_http_error(monkeypatch):
-    from urllib.error import HTTPError
+def test_compatible_provider_redacts_key_from_sdk_error(monkeypatch):
+    class Completions:
+        def create(self, **kwargs):
+            raise RuntimeError("request failed with token secret-token")
 
-    monkeypatch.setattr(
-        "amplitude_lab.llm.urlopen",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            HTTPError(
-                "https://tokens.bd/v1/chat/completions",
-                401,
-                "Unauthorized",
-                {},
-                io.BytesIO(b"bad token secret-token"),
-            )
-        ),
-    )
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     client = OpenAICompatibleLLM("secret-token", "qwen-3.7-plus")
     with pytest.raises(LLMError) as exc:
         client.complete("system", [{"role": "user", "text": "prompt"}])
-    assert "401" in str(exc.value)
+    assert "RuntimeError" in str(exc.value)
     assert "secret-token" not in str(exc.value)
 
 
 def test_compatible_provider_reports_finish_reason(monkeypatch):
-    class Response:
-        def __enter__(self):
-            return self
+    class Completions:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=None),
+                        finish_reason="length",
+                    )
+                ]
+            )
 
-        def __exit__(self, *args):
-            return False
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
 
-        def read(self, size):
-            return b'{"choices":[{"finish_reason":"length"}]}'
-
-    monkeypatch.setattr("amplitude_lab.llm.urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     with pytest.raises(LLMError, match="finish reason: length"):
         OpenAICompatibleLLM("key", "qwen-3.7-plus").complete(
             "system", [{"role": "user", "text": "prompt"}]
@@ -223,9 +219,7 @@ def test_empty_response_reports_gemini_reason(monkeypatch):
                 {
                     "text": None,
                     "prompt_feedback": type("F", (), {"block_reason": "SAFETY"})(),
-                    "candidates": [
-                        type("C", (), {"finish_reason": "MAX_TOKENS"})()
-                    ],
+                    "candidates": [type("C", (), {"finish_reason": "MAX_TOKENS"})()],
                 },
             )()
 
@@ -237,32 +231,3 @@ def test_empty_response_reports_gemini_reason(monkeypatch):
     with pytest.raises(LLMError, match="prompt block reason: SAFETY") as exc:
         GeminiLLM("k", "m").complete("s", [{"role": "user", "text": "x"}])
     assert "candidate finish reason: MAX_TOKENS" in str(exc.value)
-
-
-def test_cli_selftest(capsys):
-    assert main(["selftest", "--seeds", "5"]) == 0
-    assert "reference passed 5 of 5 seeds" in capsys.readouterr().out
-
-
-def test_cli_verify_pass_and_fail(capsys):
-    assert main(["verify", str(CANDIDATES / "correct.py"), "--trusted", "--seed", "4"]) == 0
-    capsys.readouterr()
-    assert (
-        main(["verify", str(CANDIDATES / "no_mu.py"), "--trusted", "--details", "--seed", "4"]) == 1
-    )
-    out = capsys.readouterr().out
-    assert "FAIL scale_covariance" in out and "worst_ratio" in out and "seed 4" in out
-
-
-def test_cli_task_prints_statement(capsys):
-    assert main(["task"]) == 0
-    assert "massless phi^4" in capsys.readouterr().out
-
-
-def test_cli_unknown_task(capsys):
-    assert main(["task", "--task", "no_such_task"]) == 2
-
-
-def test_cli_agent_without_key(capsys):
-    assert main(["agent", "--model", "x"]) == 2
-    assert "OPENAI_API_KEY" in capsys.readouterr().err

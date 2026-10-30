@@ -1,108 +1,162 @@
+"""Command-line entry points for the deterministic lab and analytical workflows."""
+
+from __future__ import annotations
+
 import argparse
+import json
+import os
 import sys
+from pathlib import Path
 
-from . import reference
-from .agent import run_agent
-from .candidate import Candidate
+from . import __version__, conventions
+from .amplitude import assemble
+from .assistant.client import GeminiClient
+from .assistant.config import GeminiConfig
+from .assistant.errors import (
+    AssistantConfigError,
+    AssistantRequestError,
+    AssistantUnavailableError,
+)
+from .assistant.mock import mock_client
+from .benchmarks import resolve
 from .derivation import run_derivation
+from .kinematics import Kinematics
 from .llm import LLMError, llm_from_env
+from .pipeline import run_pipeline
+from .reporting import write_json, write_markdown
 from .task import Task
-from .verify import verify
+from .validation import list_checks, run_all
+
+DEFAULT_AUDIT_MODEL = "deepseek/deepseek-v4-flash-latest"
 
 
-def _print_report(report, details):
-    print(report.feedback())
-    if details:
-        print(f"seed {report.seed}")
-        for r in report.results:
-            print(f"  {r.name}: {r.detail}")
+def _assistant_from_name(name):
+    if name is None:
+        return None
+    if name == "gemini":
+        config = GeminiConfig.from_env(load_dotenv=True)
+        config.require_key()
+        return GeminiClient(config)
+    if name.startswith("mock-"):
+        return mock_client(name.removeprefix("mock-"))
+    raise ValueError(f"Unknown assistant {name!r}; use 'gemini' or 'mock-<proposal>'.")
 
 
-def cmd_task(args):
-    task = Task.load(args.task)
-    if args.analytical:
-        if not task.derivation_prompt:
-            print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
-            return 2
-        print(task.derivation_prompt)
-    else:
-        print(task.statement)
+def cmd_run(args):
+    try:
+        problem = resolve(args.problem)
+        assistant = _assistant_from_name(args.assistant)
+        report = run_pipeline(problem, assistant)
+        out_dir = Path(args.out_dir)
+        write_json(report, out_dir / "run.json")
+        write_markdown(report, out_dir / "run.md")
+    except (AssistantConfigError, FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Overall status: {report['overall_status'].upper()}")
+    print(f"report: {out_dir / 'run.md'}")
+    return 0 if report["overall_status"] == "pass" else 1
+
+
+def cmd_smoke(_args):
+    try:
+        client = GeminiClient(GeminiConfig.from_env(load_dotenv=True))
+        print(client.smoke_test())
+    except (
+        AssistantConfigError,
+        AssistantRequestError,
+        AssistantUnavailableError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
-def cmd_verify(args):
-    task = Task.load(args.task)
-    candidate = Candidate(path=args.file, isolated=not args.trusted, timeout=task.eval_timeout)
-    report = verify(candidate, suite=task.suite, seed=args.seed)
-    _print_report(report, args.details)
-    return 0 if report.passed else 1
-
-
-def cmd_selftest(args):
-    task = Task.load(args.task)
-    candidate = Candidate.from_function(reference.amplitude)
-    bad = 0
-    for seed in range(args.seeds):
-        report = verify(candidate, suite=task.suite, seed=seed)
-        bad += not report.passed
-        if args.details or not report.passed:
-            _print_report(report, args.details)
-    print(f"reference passed {args.seeds - bad} of {args.seeds} seeds")
-    return 0 if bad == 0 else 1
-
-
-def cmd_agent(args):
-    task = Task.load(args.task)
+def cmd_validate(args):
     try:
-        llm = llm_from_env(
-            provider=args.provider, model=args.model, temperature=args.temperature
-        )
-    except LLMError as exc:
+        problem = resolve(args.problem)
+        results = run_all(problem, only=args.only)
+    except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(f"task {task.name}, model {llm.name}")
-    result = run_agent(task, llm, runs_dir=args.runs_dir, echo=print)
-    state = "solved" if result.solved else "not solved"
-    elapsed = result.elapsed_seconds
-    minutes, seconds = divmod(int(elapsed), 60)
-    elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-    print(
-        f"{state} ({result.reason}); {result.attempts} submissions, {result.turns} turns; "
-        f"elapsed {elapsed_text}"
-    )
-    if result.structural_solved and not result.solved:
-        print("every structural check passed at some point; the reference match did not")
-    print(f"log: {result.run_dir}")
-    return 0 if result.solved else 1
+
+    for result in results:
+        status = "PASS" if result.passed else "FAIL"
+        print(f"{status} {result.name} [{result.evidence}]: {result.message}")
+    return 0 if all(result.passed for result in results) else 1
+
+
+def cmd_amplitude(args):
+    try:
+        problem = resolve(args.problem)
+        result = assemble(problem, Kinematics.from_s_t(args.s, args.t))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0
+
+
+def cmd_describe(_args):
+    print(json.dumps(conventions.describe(), indent=2))
+    return 0
+
+
+def cmd_list_checks(_args):
+    for check in list_checks():
+        print(f"{check.name} [{check.evidence}]: {check.description}")
+    return 0
+
+
+def cmd_task(args):
+    try:
+        task = Task.load(args.task)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not task.derivation_prompt.strip():
+        print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
+        return 2
+    print(task.derivation_prompt)
+    return 0
 
 
 def cmd_derive(args):
-    task = Task.load(args.task)
-    if not task.derivation_prompt:
+    try:
+        task = Task.load(args.task)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not task.derivation_prompt.strip():
         print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
         return 2
     try:
-        llm = llm_from_env(
-            provider=args.provider, model=args.model, temperature=args.temperature
-        )
+        llm = llm_from_env(provider=args.provider, model=args.model, temperature=args.temperature)
+        selected_provider = args.provider or os.environ.get("LLM_PROVIDER", "openai-compatible")
+        audit_model = args.audit_model or os.environ.get("LLM_AUDIT_MODEL")
+        if not audit_model and selected_provider in (
+            "openai-compatible",
+            "openai_compatible",
+        ):
+            audit_model = DEFAULT_AUDIT_MODEL
         audit_llm = (
             llm_from_env(
-                provider=args.provider, model=args.audit_model, temperature=args.temperature
+                provider=selected_provider, model=audit_model, temperature=args.temperature
             )
-            if args.audit_model
+            if audit_model
             else llm
         )
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
     print(f"task {task.name}, model {llm.name}; audit model {audit_llm.name}")
-    result = run_derivation(
-        task, llm, runs_dir=args.runs_dir, echo=print, audit_llm=audit_llm
-    )
+    result = run_derivation(task, llm, runs_dir=args.runs_dir, echo=print, audit_llm=audit_llm)
     minutes, seconds = divmod(int(result.elapsed_seconds), 60)
     elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
     print(f"derivation workflow {result.status}; elapsed {elapsed_text}")
-    print(f"report: {result.run_dir}\\result.md")
+    print(f"report: {Path(result.run_dir) / 'result.md'}")
     if result.error:
         return 1
     print("Both model responses were received; the result still needs independent validation.")
@@ -110,57 +164,52 @@ def cmd_derive(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="amplitude-lab")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(prog="amplitude-lab")
+    parser.add_argument("--version", action="version", version=__version__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
 
-    t = sub.add_parser("task", help="print the task statement the agent sees")
-    t.add_argument("--task", default="phi4_dim4")
-    t.add_argument(
-        "--analytical", action="store_true", help="print the analytical derivation prompt"
-    )
-    t.set_defaults(func=cmd_task)
+    run = sub.add_parser("run", help="run deterministic checks and write a report")
+    run.add_argument("--problem", default="yhg_dim4")
+    run.add_argument("--assistant", default=None, help="optional Gemini or mock assistant")
+    run.add_argument("--out-dir", default="runs/latest")
+    run.set_defaults(func=cmd_run)
 
-    v = sub.add_parser("verify", help="run the checks on a candidate file")
-    v.add_argument("file")
-    v.add_argument("--task", default="phi4_dim4")
-    v.add_argument("--seed", type=int, default=None, help="fix the random check points")
-    v.add_argument("--trusted", action="store_true", help="import in-process (your own code only)")
-    v.add_argument(
-        "--details", action="store_true", help="also print numbers (not shown to agents)"
-    )
-    v.set_defaults(func=cmd_verify)
+    smoke = sub.add_parser("smoke", help="test Gemini API connectivity")
+    smoke.set_defaults(func=cmd_smoke)
 
-    s = sub.add_parser("selftest", help="run the checks on the reference amplitude, several seeds")
-    s.add_argument("--task", default="phi4_dim4")
-    s.add_argument("--seeds", type=int, default=20)
-    s.add_argument("--details", action="store_true")
-    s.set_defaults(func=cmd_selftest)
+    validate = sub.add_parser("validate", help="run selected deterministic checks")
+    validate.add_argument("--problem", default="yhg_dim4")
+    validate.add_argument("--only", action="append", default=None)
+    validate.set_defaults(func=cmd_validate)
 
-    a = sub.add_parser("agent", help="let a configured model work on the code task")
-    a.add_argument("--task", default="phi4_dim4")
-    a.add_argument("--model", default=None)
-    a.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
-    a.add_argument("--temperature", type=float, default=0.7)
-    a.add_argument("--runs-dir", default="runs")
-    a.set_defaults(func=cmd_agent)
+    amplitude = sub.add_parser("amplitude", help="evaluate the amplitude at one kinematic point")
+    amplitude.add_argument("--problem", default="yhg_dim4")
+    amplitude.add_argument("--s", type=float, required=True)
+    amplitude.add_argument("--t", type=float, required=True)
+    amplitude.set_defaults(func=cmd_amplitude)
 
-    d = sub.add_parser(
-        "derive", help="derive an analytical amplitude and request a separate model audit"
-    )
-    d.add_argument("--task", default="phi4_dim4")
-    d.add_argument("--model", default=None)
-    d.add_argument("--audit-model", default=None, help="different model ID for the audit request")
-    d.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
-    d.add_argument("--temperature", type=float, default=0.2)
-    d.add_argument("--runs-dir", default="runs")
-    d.set_defaults(func=cmd_derive)
+    describe = sub.add_parser("describe", help="print the supported physics conventions")
+    describe.set_defaults(func=cmd_describe)
 
-    args = p.parse_args(argv)
-    try:
-        return args.func(args)
-    except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    checks = sub.add_parser("list-checks", help="list deterministic checks")
+    checks.set_defaults(func=cmd_list_checks)
+
+    task = sub.add_parser("task", help="print the analytical derivation prompt")
+    task.add_argument("--task", default="phi4_dim4")
+    task.add_argument("--analytical", action="store_true", help=argparse.SUPPRESS)
+    task.set_defaults(func=cmd_task)
+
+    derive = sub.add_parser("derive", help="derive an amplitude and request a separate model audit")
+    derive.add_argument("--task", default="phi4_dim4")
+    derive.add_argument("--model", default=None)
+    derive.add_argument("--audit-model", default=None, help="model ID for the audit request")
+    derive.add_argument("--provider", choices=("openai-compatible", "gemini"), default=None)
+    derive.add_argument("--temperature", type=float, default=0.2)
+    derive.add_argument("--runs-dir", default="runs")
+    derive.set_defaults(func=cmd_derive)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
 
 
 if __name__ == "__main__":

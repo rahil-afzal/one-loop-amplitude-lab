@@ -1,10 +1,13 @@
 import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-CANDIDATES = ROOT / "examples" / "candidates"
+from amplitude_lab.benchmarks import resolve
+
+
+@pytest.fixture
+def problem():
+    return resolve("yhg_dim4")
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +18,7 @@ def _no_real_keys(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_AUDIT_MODEL", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.delenv("LLM_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("GEMINI_TIMEOUT_SECONDS", raising=False)
