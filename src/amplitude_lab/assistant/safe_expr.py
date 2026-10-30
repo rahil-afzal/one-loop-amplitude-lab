@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import math
 import operator
+from contextvars import ContextVar
 
 import mpmath as mp
 import sympy as sp
@@ -25,6 +26,7 @@ S = sp.Symbol("s", complex=True)
 MU2 = sp.Symbol("mu2", positive=True)
 
 _NAMES = {"s": S, "mu2": MU2, "pi": sp.pi, "I": sp.I}
+_EXTRA_NAMES: ContextVar[dict] = ContextVar("extra_names", default={})
 _FUNCTIONS = {"log": sp.log, "ln": sp.log, "sqrt": sp.sqrt, "exp": sp.exp}
 _BINOPS = {
     ast.Add: operator.add,
@@ -52,9 +54,10 @@ def _convert(node: ast.AST) -> sp.Expr:
         return sp.sympify(value)
 
     if isinstance(node, ast.Name):
-        if node.id not in _NAMES:
+        names = {**_NAMES, **_EXTRA_NAMES.get()}
+        if node.id not in names:
             raise CandidateParseError(f"Disallowed name: {node.id!r}.")
-        return _NAMES[node.id]
+        return names[node.id]
 
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
         return _UNARY[type(node.op)](_convert(node.operand))
@@ -101,7 +104,16 @@ def extract_expression(text: str) -> str:
     return cleaned.replace("^", "**").replace("\u2212", "-")
 
 
-def parse_expression(text: str) -> sp.Expr:
+def parse_expression(text: str, extra_names: tuple[str, ...] = ()) -> sp.Expr:
+    """Parse a proposal; ``extra_names`` adds plain complex symbols (e.g. ``t``, ``c4``)."""
+    token = _EXTRA_NAMES.set({name: sp.Symbol(name, complex=True) for name in extra_names})
+    try:
+        return _parse_expression(text)
+    finally:
+        _EXTRA_NAMES.reset(token)
+
+
+def _parse_expression(text: str) -> sp.Expr:
     expression = extract_expression(text)
     if not expression:
         raise CandidateParseError("Empty proposal.")

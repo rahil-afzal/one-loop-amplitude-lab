@@ -28,6 +28,29 @@ and limitations are described in [ASSISTANT.md](ASSISTANT.md).
 for review, but prose is not executed or treated as validated physics. Use the deterministic
 commands and independent sources to verify any claimed result.
 
+## Iterative audit loop (`refine`) and deterministic verification
+
+`refine` runs derive -> audit -> revise for up to `--max-rounds` rounds (`feedback.py`).
+
+- The derivation agent does the physics and must end with a ```final block giving
+  `A_tree`, `A_loop` and `beta_c4`.
+- The audit agent returns `VERDICT`, `FIRST_ERROR`, `ERROR` and `HINT`. It is told not to
+  write a full solution. Its text, not a reference answer, is what the next round sees.
+- `verification.py` checks the final block after every round, with no LLM involved. The
+  checks are: parseability through the AST allowlist, the tree value, the one-loop
+  amplitude against `assemble` at physical `s + i0` points for two `mu2` values,
+  crossing invariance at complex points, and the beta-function sign.
+  The verdict is saved per round (`roundN_verification.json`) and is never shown to the
+  derivation agent. Any gain from round 1 to round N therefore comes from the audit
+  feedback alone.
+- An audit `PASS` never overrides a failed verification. Both are recorded separately.
+
+`verify FILE` runs only the deterministic layer on a saved derivation.
+
+Limits: the references come from this repository (`amplitude.py`, `conventions.py`), so the
+check is consistency with the repo's stated result, not an external proof. The check is
+finite-sample. One task (massless phi^4) means few runs say little about accuracy.
+
 ## Data and generated files
 
 Task directories contain analytical prompts. CLI reports, prompts, transcripts, and request

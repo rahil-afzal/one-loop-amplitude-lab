@@ -19,12 +19,14 @@ from .assistant.errors import (
 from .assistant.mock import mock_client
 from .benchmarks import resolve
 from .derivation import run_derivation
+from .feedback import run_feedback_loop
 from .kinematics import Kinematics
 from .llm import LLMError, llm_from_env
 from .pipeline import run_pipeline
 from .reporting import write_json, write_markdown
 from .task import Task
 from .validation import list_checks, run_all
+from .verification import verify_final_answer
 
 DERIVATION_MODEL = "anthropic/claude-sonnet-5.5"
 AUDIT_MODEL = "anthropic/claude-opus-5-5"
@@ -163,6 +165,45 @@ def cmd_derive(args):
     return 0
 
 
+def cmd_refine(args):
+    try:
+        task = Task.load(args.task)
+        llm = llm_from_env(
+            provider="openai-compatible",
+            model=DERIVATION_MODEL,
+            temperature=args.temperature,
+            timeout=args.timeout_seconds,
+        )
+        audit_llm = llm_from_env(
+            provider="openai-compatible",
+            model=AUDIT_MODEL,
+            temperature=args.temperature,
+            timeout=args.timeout_seconds,
+        )
+    except (FileNotFoundError, LLMError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"task {task.name}, model {llm.name}; audit model {audit_llm.name}")
+    result = run_feedback_loop(
+        task, llm, audit_llm, runs_dir=args.runs_dir, max_rounds=args.max_rounds, echo=print
+    )
+    print(f"feedback loop {result.status}; rounds {len(result.rounds)}; report: {result.run_dir}")
+    print(f"deterministic verification of final round: "
+          f"{'PASS' if result.final_verification_passed else 'FAIL'}")
+    return 0 if result.status != "failed" and result.final_verification_passed else 1
+
+
+def cmd_verify(args):
+    try:
+        text = Path(args.file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    report = verify_final_answer(text)
+    print(report.summary())
+    return 0 if report.passed else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="amplitude-lab")
     parser.add_argument("--version", action="version", version=__version__)
@@ -212,6 +253,20 @@ def main(argv=None):
     )
     derive.add_argument("--runs-dir", default="runs")
     derive.set_defaults(func=cmd_derive)
+
+    refine = sub.add_parser(
+        "refine", help="derive, audit, revise in a loop; verify deterministically each round"
+    )
+    refine.add_argument("--task", default="phi4_dim4")
+    refine.add_argument("--temperature", type=float, default=0.2)
+    refine.add_argument("--timeout-seconds", type=float, default=None)
+    refine.add_argument("--max-rounds", type=int, default=3)
+    refine.add_argument("--runs-dir", default="runs")
+    refine.set_defaults(func=cmd_refine)
+
+    verify = sub.add_parser("verify", help="check the final block of a saved derivation file")
+    verify.add_argument("file")
+    verify.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)
     return args.func(args)
