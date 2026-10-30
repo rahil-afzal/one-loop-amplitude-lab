@@ -51,7 +51,9 @@ because the final expression resembles a known result. Report PASS, FAIL, or UNC
 each item. If the derivation omits a needed intermediate step, mark it UNCERTAIN rather than
 filling the gap with an unsupported assertion. If you find an error, provide the corrected
 formula and identify the first step where it enters. This model audit is a review, not a
-mathematical proof or a substitute for the deterministic checks."""
+mathematical proof or a substitute for the deterministic checks. Keep the report concise:
+one short line per check, followed by a corrected formula only if needed; stay under 500
+words."""
 
 DERIVATION_STEPS = (
     (
@@ -151,16 +153,6 @@ DERIVATION_STEPS = (
         "one-loop running of c4 required to cancel the explicit scale dependence. Do not "
         "insert a memorized beta function. Limit to 120 words.",
     ),
-    (
-        "final synthesis",
-        "Final step — Reconstruct the derivation only from the completed steps: Feynman "
-        "rules, tree graph, definition and evaluation of J_0, subtraction, channel factors, "
-        "sum, branches, and checks. Keep J_R distinct from F and from the full diagram. "
-        "Include the key equations that connect these stages and one boxed amplitude through "
-        "O(c4^2). If any earlier steps conflict, resolve the conflict from the stated "
-        "conventions and identify it; do not silently select a preferred answer. Do not add "
-        "new checks or unsupported claims. Limit to 700 words.",
-    ),
 )
 
 STEP_CONTEXT = {
@@ -177,7 +169,6 @@ STEP_CONTEXT = {
     12: (9,),
     13: (9, 10),
     14: (9,),
-    15: (0, 1, 6, 7, 8, 9, 10, 11, 12, 13),
 }
 
 
@@ -224,7 +215,6 @@ class DerivationLog:
     def finish(
         self,
         result: "DerivationResult",
-        derivation: str = "",
         audit: str = "",
         completed_steps: list[tuple[str, str]] | None = None,
     ) -> None:
@@ -233,8 +223,6 @@ class DerivationLog:
             sections.extend(["## Completed work steps", ""])
             for label, response in completed_steps:
                 sections.extend([f"### {label.title()}", "", response.rstrip(), ""])
-        if derivation:
-            sections.extend(["## Model derivation", "", derivation.rstrip(), ""])
         if audit:
             sections.extend(
                 [
@@ -329,7 +317,6 @@ def run_derivation(task, llm, runs_dir="runs", echo=None, audit_llm=None) -> Der
         run_dir=str(log.dir),
         audit_model=getattr(audit_llm, "name", "unknown"),
     )
-    derivation = ""
     audit = ""
     completed_steps: list[tuple[str, str]] = []
     current_stage = "derivation_step_1"
@@ -365,8 +352,6 @@ def run_derivation(task, llm, runs_dir="runs", echo=None, audit_llm=None) -> Der
                 response_chars=len(response),
             )
 
-        derivation = completed_steps[-1][1]
-
         current_stage = "audit"
         derivation_record = "\n\n".join(
             f"### Step {index}: {label}\n{response.rstrip()}"
@@ -401,7 +386,7 @@ def run_derivation(task, llm, runs_dir="runs", echo=None, audit_llm=None) -> Der
         say(f"Request failed: {result.error}")
     finally:
         result.elapsed_seconds = time.monotonic() - started
-        log.finish(result, derivation, audit, completed_steps)
+        log.finish(result, audit, completed_steps)
         say(f"Saved analytical report to {log.dir}")
 
     return result

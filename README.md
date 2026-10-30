@@ -33,11 +33,12 @@ For Gemini connectivity, install `.[gemini]`, set `GEMINI_API_KEY`, then use
 
 ## Analytical derivation
 
-The separate `derive` workflow requests fourteen focused work steps, then a final synthesis.
-Only relevant completed work is supplied to each next step in a fresh request; a second-pass
-review follows the synthesis. Prompts, step responses, metadata, and timings are stored in
-`runs/`, including completed steps if a later request fails. Both the derivation and review
-currently use `qwen/qwen-3.8-max`; the review is a second response
+The separate `derive` workflow requests fourteen focused work steps, then a second-pass review.
+Only relevant completed work is supplied to each next step in a fresh request. The report
+assembles the saved steps directly, avoiding an extra model call that would only rephrase
+them. Prompts, step responses, metadata, and timings are stored in `runs/`, including
+completed steps if a later request fails. Both the derivation and review currently use
+`qwen/qwen-3.8-max`; the review is a second response
 from the same model, not an independent proof, and its text is **not** submitted to the
 deterministic verifier.
 
@@ -57,8 +58,10 @@ for one run. The default is 180 seconds. Set `OPENAI_STREAM=true` to consume str
 from compatible endpoints; this can prevent idle gateway timeouts while the model is
 generating. Set it to `false` if the endpoint does not support streaming. Streaming does not
 override a provider's hard total-generation limit, so keep the client timeout longer than the
-expected request duration. This fixed-model derivation currently uses the OpenAI-compatible
-endpoint configured above.
+expected request duration. `OPENAI_MAX_TOKENS` controls the completion token budget (default
+4096); increase it only if the endpoint/model allows it and the response ends with
+`finish_reason=length`. This is separate from the network timeout and streaming setting. This
+fixed-model derivation currently uses the OpenAI-compatible endpoint configured above.
 
 ## Project layout
 

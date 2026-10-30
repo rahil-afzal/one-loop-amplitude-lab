@@ -8,7 +8,7 @@ class LLMError(RuntimeError):
 
 DEFAULT_OPENAI_BASE_URL = "https://tokens.bd/v1"
 DEFAULT_LLM_TIMEOUT = 180.0
-DEFAULT_OPENAI_MAX_TOKENS = 2048
+DEFAULT_OPENAI_MAX_TOKENS = 4096
 
 
 class ScriptedLLM:
@@ -73,6 +73,17 @@ def _bool_from_env(name, default=False):
     raise LLMError(f"{name} must be a boolean (true/false).")
 
 
+def _max_tokens_from_env(default=DEFAULT_OPENAI_MAX_TOKENS):
+    raw_tokens = os.environ.get("OPENAI_MAX_TOKENS", str(default))
+    try:
+        max_tokens = int(raw_tokens)
+    except ValueError as exc:
+        raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.") from exc
+    if max_tokens <= 0:
+        raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.")
+    return max_tokens
+
+
 class OpenAICompatibleLLM:
     """Client for OpenAI-compatible chat-completions endpoints."""
 
@@ -84,6 +95,7 @@ class OpenAICompatibleLLM:
         temperature=0.2,
         timeout=DEFAULT_LLM_TIMEOUT,
         stream=False,
+        max_tokens=DEFAULT_OPENAI_MAX_TOKENS,
     ):
         if not api_key:
             raise LLMError("OPENAI_API_KEY is not set.")
@@ -97,6 +109,7 @@ class OpenAICompatibleLLM:
         self.temperature = temperature
         self.timeout = timeout
         self.stream = stream
+        self.max_tokens = max_tokens
         self.name = f"openai-compatible:{model}"
 
     @classmethod
@@ -110,6 +123,7 @@ class OpenAICompatibleLLM:
             temperature=temperature,
             timeout=_timeout_from_env(timeout=timeout),
             stream=_bool_from_env("OPENAI_STREAM"),
+            max_tokens=_max_tokens_from_env(),
         )
 
     def __repr__(self):
@@ -127,6 +141,7 @@ class OpenAICompatibleLLM:
             "temperature": self.temperature,
             "timeout_s": self.timeout,
             "stream": self.stream,
+            "max_tokens": self.max_tokens,
         }
 
     def complete(self, system, messages):
@@ -151,7 +166,7 @@ class OpenAICompatibleLLM:
                 messages=[{"role": "system", "content": system}]
                 + [{"role": message["role"], "content": message["text"]} for message in messages],
                 temperature=self.temperature,
-                max_tokens=DEFAULT_OPENAI_MAX_TOKENS,
+                max_tokens=self.max_tokens,
                 stream=self.stream,
             )
             if self.stream:
@@ -194,6 +209,13 @@ class OpenAICompatibleLLM:
         except Exception as exc:
             raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
 
+        if finish_reason == "length":
+            raise LLMError(
+                "Chat API reached its completion token limit "
+                f"(finish reason: length, OPENAI_MAX_TOKENS={self.max_tokens}); "
+                "the response may be incomplete. Increase OPENAI_MAX_TOKENS if the "
+                "model/provider allows it."
+            )
         if not isinstance(content, str) or not content.strip():
             detail = f" (finish reason: {finish_reason})" if finish_reason else ""
             raise LLMError(

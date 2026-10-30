@@ -26,7 +26,7 @@ from .reporting import write_json, write_markdown
 from .task import Task
 from .validation import list_checks, run_all
 
-DERIVATION_MODEL = "anthropic/claude-opus-5-5"
+DERIVATION_MODEL = "anthropic/claude-sonnet-5.5"
 AUDIT_MODEL = "anthropic/claude-opus-5-5"
 
 

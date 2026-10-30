@@ -5,6 +5,7 @@ from amplitude_lab.cli import main
 from amplitude_lab.derivation import (
     AUDIT_REQUEST,
     DERIVATION_CONTEXT,
+    DERIVATION_SYSTEM,
     DERIVATION_STEPS,
     STEP_CONTEXT,
     run_derivation,
@@ -30,9 +31,7 @@ def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):
         "Crossing check: symmetric.",
         "Imaginary part check: Im A = ...",
         "Scale check: derivative = ...",
-        "# Result\n\nThe boxed amplitude is \\(A(s,t,u)\\).",
     ]
-    derivation = steps[-1]
     audit = "PASS: crossing. UNCERTAIN: independent reference comparison."
     llm = ScriptedLLM(steps)
     auditor = ScriptedLLM([audit])
@@ -44,7 +43,8 @@ def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):
     assert result.audit_model == "scripted"
     assert result.elapsed_seconds >= 0
     assert result.derivation_seconds >= 0 and result.audit_seconds >= 0
-    assert len(llm.calls) == len(steps)
+    assert len(DERIVATION_STEPS) == 14
+    assert len(llm.calls) == 14
     assert len(auditor.calls) == 1
     assert task.derivation_prompt in llm.calls[0][0]["text"]
     assert len(llm.calls[0]) == 1
@@ -63,7 +63,6 @@ def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):
     audited_work = next(
         message["text"] for message in auditor.calls[0] if message["role"] == "assistant"
     )
-    assert derivation in audited_work
     assert steps[0] in audited_work
     assert all(step in audited_work for step in steps)
 
@@ -71,7 +70,8 @@ def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):
     assert (run_dir / "prompt.md").read_text(encoding="utf-8") == task.derivation_prompt
     report = (run_dir / "result.md").read_text(encoding="utf-8")
     assert all(step in report for step in steps)
-    assert derivation in report and audit in report
+    assert audit in report
+    assert "Model derivation" not in report
     assert "not an independent proof" in report
     assert json.loads((run_dir / "outcome.json").read_text())["status"] == "completed"
     meta = json.loads((run_dir / "meta.json").read_text())
@@ -118,7 +118,7 @@ def test_derivation_steps_require_explicit_sign_and_integral_bookkeeping():
     assert "both propagator i factors" in instructions
     assert "First show the sum for iA" in instructions
     assert "Do not insert a memorized beta function" in instructions
-    assert "resolve the conflict from the stated conventions" in instructions
+    assert "recompute from the definitions and flag the conflict" in DERIVATION_SYSTEM
 
 
 def test_derive_uses_fixed_models_and_tunable_timeout(monkeypatch, tmp_path, capsys):

@@ -5,6 +5,7 @@ import pytest
 
 from amplitude_lab.llm import (
     DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MAX_TOKENS,
     GeminiLLM,
     LLMError,
     OpenAICompatibleLLM,
@@ -58,6 +59,7 @@ def test_compatible_provider_config_from_env(monkeypatch):
     assert client.base_url == "https://tokens.bd/v1"
     assert client.timeout == 180
     assert client.stream is False
+    assert client.max_tokens == DEFAULT_OPENAI_MAX_TOKENS
     assert "gateway-secret" not in repr(client)
     assert "gateway-secret" not in str(client.describe())
 
@@ -78,6 +80,27 @@ def test_invalid_explicit_timeout_is_rejected(monkeypatch):
 
     with pytest.raises(LLMError, match="finite positive number"):
         OpenAICompatibleLLM.from_env(timeout=0, use_dotenv=False)
+
+
+def test_openai_max_tokens_from_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", "6000")
+
+    client = OpenAICompatibleLLM.from_env(use_dotenv=False)
+
+    assert client.max_tokens == 6000
+    assert client.describe()["max_tokens"] == 6000
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-2", "1.5"])
+def test_invalid_openai_max_tokens_are_rejected(monkeypatch, bad):
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", bad)
+
+    with pytest.raises(LLMError, match="OPENAI_MAX_TOKENS must be a positive integer"):
+        OpenAICompatibleLLM.from_env(use_dotenv=False)
 
 
 def test_compatible_provider_requires_api_key_and_model(monkeypatch):
@@ -131,7 +154,7 @@ def test_compatible_provider_request_shape(monkeypatch):
             {"role": "assistant", "content": "audit"},
         ],
         "temperature": 0.1,
-        "max_tokens": 2048,
+        "max_tokens": DEFAULT_OPENAI_MAX_TOKENS,
         "stream": False,
     }
 
@@ -262,6 +285,29 @@ def test_compatible_provider_reports_finish_reason(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     with pytest.raises(LLMError, match="finish reason: length"):
         OpenAICompatibleLLM("key", "qwen-3.7-plus").complete(
+            "system", [{"role": "user", "text": "prompt"}]
+        )
+
+
+def test_compatible_provider_rejects_truncated_nonempty_response(monkeypatch):
+    class Completions:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="incomplete partial answer"),
+                        finish_reason="length",
+                    )
+                ]
+            )
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
+    with pytest.raises(LLMError, match="response may be incomplete"):
+        OpenAICompatibleLLM("key", "provider/model").complete(
             "system", [{"role": "user", "text": "prompt"}]
         )
 
