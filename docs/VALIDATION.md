@@ -27,7 +27,7 @@ Run `python -m amplitude_lab list-checks` for the live list.
 
 ## Negative controls
 
-`tests/test_validation_suite.py` monkeypatches deliberately wrong physics and requires
+`tests/physics/test_validation_suite.py` monkeypatches deliberately wrong physics and requires
 the suite to fail the right checks: loop prefactor without the symmetry factor, `-i*pi`
 on the cut, tree summed over three channels, wrong beta function, dropped phi2 loop.
 A validator that cannot fail is not evidence. These controls already found one real

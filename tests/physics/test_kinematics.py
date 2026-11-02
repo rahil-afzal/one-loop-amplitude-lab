@@ -1,6 +1,6 @@
 import pytest
 
-from amplitude_lab.kinematics import PERMUTATIONS, Kinematics
+from amplitude_lab.physics.kinematics import PERMUTATIONS, Kinematics
 
 
 def test_sum_rule():

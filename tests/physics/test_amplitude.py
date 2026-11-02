@@ -2,9 +2,9 @@ import math
 
 import pytest
 
-from amplitude_lab import conventions
-from amplitude_lab.amplitude import assemble, forward_one_loop_imag
-from amplitude_lab.kinematics import PERMUTATIONS, Kinematics
+from amplitude_lab.physics import conventions
+from amplitude_lab.physics.amplitude import assemble, forward_one_loop_imag
+from amplitude_lab.physics.kinematics import PERMUTATIONS, Kinematics
 
 
 def test_tree_is_single_contact(problem):
@@ -32,7 +32,7 @@ def test_crossing(problem):
 
 
 def test_vanishing_coupling():
-    from amplitude_lab.problem import ProblemSpec
+    from amplitude_lab.physics.problem import ProblemSpec
 
     result = assemble(ProblemSpec(name="zero", c4=0.0, c42=0.0), Kinematics.from_s_t(5.0, -2.0))
     assert result.total == 0

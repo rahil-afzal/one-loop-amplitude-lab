@@ -3,7 +3,7 @@ import types
 
 import pytest
 
-from amplitude_lab.llm import (
+from amplitude_lab.workflows.llm import (
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MAX_TOKENS,
     GeminiLLM,

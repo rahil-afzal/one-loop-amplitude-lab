@@ -4,9 +4,9 @@ import math
 
 import pytest
 
-from amplitude_lab import amplitude, conventions
-from amplitude_lab.benchmarks import BUILTIN
 from amplitude_lab.integrals.bubble import bubble_analytic
+from amplitude_lab.physics import amplitude, conventions
+from amplitude_lab.physics.benchmarks import BUILTIN
 from amplitude_lab.validation import list_checks, run_all
 from amplitude_lab.validation.base import EVIDENCE_KINDS, REGISTRY, Outcome, register
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 
-from .. import conventions
 from ..integrals.bubble import (
     bubble_analytic,
     bubble_discontinuity,
@@ -12,7 +11,8 @@ from ..integrals.bubble import (
     bubble_real_part_quad,
 )
 from ..integrals.momentum_space import euclidean_bubble_difference_numeric
-from ..problem import ProblemSpec
+from ..physics import conventions
+from ..physics.problem import ProblemSpec
 from .base import IMPLEMENTATION, INDEPENDENT, Outcome, register, rel_err
 
 

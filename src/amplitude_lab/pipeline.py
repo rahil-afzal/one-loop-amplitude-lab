@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from .amplitude import assemble
 from .assistant.client import AssistantClient
 from .assistant.orchestrator import run_task
 from .assistant.tasks import BubbleClosedFormTask
-from .kinematics import BENCHMARK_POINTS
-from .problem import ProblemSpec
+from .physics.amplitude import assemble
+from .physics.kinematics import BENCHMARK_POINTS
+from .physics.problem import ProblemSpec
 from .reporting import build_report
 from .validation import run_all
 

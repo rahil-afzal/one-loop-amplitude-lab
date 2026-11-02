@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import math
 
-from .. import conventions, dispersion
-from ..amplitude import assemble, forward_one_loop_imag
-from ..crosssection import im_amplitude_from_unitarity, im_bubble_from_unitarity, sigma_tree
-from ..kinematics import Kinematics
-from ..problem import ProblemSpec
+from ..physics import conventions, dispersion
+from ..physics.amplitude import assemble, forward_one_loop_imag
+from ..physics.crosssection import im_amplitude_from_unitarity, im_bubble_from_unitarity, sigma_tree
+from ..physics.kinematics import Kinematics
+from ..physics.problem import ProblemSpec
 from .base import INDEPENDENT, REFERENCE, Outcome, register, rel_err
 
 

@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 
-from amplitude_lab.feedback import parse_verdict, run_feedback_loop
-from amplitude_lab.llm import ScriptedLLM
-from amplitude_lab.task import Task
+from amplitude_lab.workflows.feedback import parse_verdict, run_feedback_loop
+from amplitude_lab.workflows.llm import ScriptedLLM
+from amplitude_lab.workflows.task import Task
 
 GOOD = "c4**2/(32*pi**2) * (6 - log(-s/mu2) - log(-t/mu2) - log(-u/mu2))"
 BAD = GOOD.replace("6 -", "3 -")

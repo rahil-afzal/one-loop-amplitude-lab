@@ -2,7 +2,7 @@ from fractions import Fraction
 
 import pytest
 
-from amplitude_lab import combinatorics as comb
+from amplitude_lab.physics import combinatorics as comb
 
 PHI4 = ("1", "1", "1", "1")
 MIXED = ("1", "1", "2", "2")

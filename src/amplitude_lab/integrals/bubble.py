@@ -18,7 +18,7 @@ import math
 import mpmath as mp
 from scipy.integrate import quad
 
-from ..conventions import DEFAULT_MU2
+from ..physics.conventions import DEFAULT_MU2
 
 
 def _check_mu2(mu2: float) -> None:

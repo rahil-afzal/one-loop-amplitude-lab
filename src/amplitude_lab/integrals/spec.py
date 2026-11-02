@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..conventions import DIMENSION, PRESCRIPTION, SCHEME
+from ..physics.conventions import DIMENSION, PRESCRIPTION, SCHEME
 
 
 @dataclass(frozen=True)

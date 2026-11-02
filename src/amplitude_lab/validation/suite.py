@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 
-from ..problem import ProblemSpec
+from ..physics.problem import ProblemSpec
 from .base import REGISTRY, CheckResult, CheckSpec
 
 # Explicit import order fixes the (reader-friendly) order of the registry.

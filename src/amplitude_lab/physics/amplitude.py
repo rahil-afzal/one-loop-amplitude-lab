@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..integrals.bubble import bubble_analytic
 from . import conventions
-from .integrals.bubble import bubble_analytic
 from .kinematics import Kinematics
 from .problem import ProblemSpec
 

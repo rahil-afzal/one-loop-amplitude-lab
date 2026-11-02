@@ -1,4 +1,4 @@
-from amplitude_lab.verification import extract_final_block, verify_final_answer
+from amplitude_lab.workflows.verification import extract_final_block, verify_final_answer
 
 LOOP = "c4**2/(32*pi**2) * (6 - log(-s/mu2) - log(-t/mu2) - log(-u/mu2))"
 BETA = "-3*c4**2/(16*pi**2)"

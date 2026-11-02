@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 from fractions import Fraction
 
-from .. import combinatorics, conventions
-from ..amplitude import assemble
-from ..kinematics import BENCHMARK_POINTS, PERMUTATIONS
-from ..problem import ProblemSpec
+from ..physics import combinatorics, conventions
+from ..physics.amplitude import assemble
+from ..physics.kinematics import BENCHMARK_POINTS, PERMUTATIONS
+from ..physics.problem import ProblemSpec
 from .base import CONSISTENCY, INDEPENDENT, Outcome, register, rel_err
 
 

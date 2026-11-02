@@ -1,10 +1,10 @@
 """Minimal tour of the API. Run: python examples/quickstart.py"""
 
-from amplitude_lab import benchmarks
-from amplitude_lab.amplitude import assemble
 from amplitude_lab.assistant import BubbleClosedFormTask, run_task
 from amplitude_lab.assistant.mock import mock_client
-from amplitude_lab.kinematics import Kinematics
+from amplitude_lab.physics import benchmarks
+from amplitude_lab.physics.amplitude import assemble
+from amplitude_lab.physics.kinematics import Kinematics
 from amplitude_lab.validation import run_all
 
 problem = benchmarks.yhg_dim4()

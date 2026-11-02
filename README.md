@@ -65,11 +65,17 @@ fixed-model derivation currently uses the OpenAI-compatible endpoint configured 
 
 ## Project layout
 
-- `src/amplitude_lab/`: physics model, integral implementations, deterministic validation,
-  optional proposal assistant, reporting, and CLI.
+- `src/amplitude_lab/physics/`: amplitude model, kinematics, conventions, and benchmark
+  problems.
+- `src/amplitude_lab/integrals/` and `src/amplitude_lab/validation/`: integral implementations
+  and deterministic checks.
+- `src/amplitude_lab/assistant/` and `src/amplitude_lab/workflows/`: optional proposal
+  assistant and LLM-backed derivation/review workflows.
+- `src/amplitude_lab/cli.py`, `pipeline.py`, and `reporting.py`: application entry points,
+  orchestration, and reports.
 - `src/amplitude_lab/tasks/`: analytical task prompts.
 - `examples/quickstart.py`: offline end-to-end example.
-- `tests/`: physics, validation, assistant, CLI, and provider tests.
+- `tests/`: tests grouped under `physics/`, `assistant/`, and `workflows/`.
 - `docs/`: conventions, validation evidence, assistant trust model, design, and roadmap.
 
 Runs and generated reports are local outputs and are ignored by Git.

@@ -2,16 +2,16 @@ import json
 from pathlib import Path
 
 from amplitude_lab.cli import main
-from amplitude_lab.derivation import (
+from amplitude_lab.workflows.derivation import (
     AUDIT_REQUEST,
     DERIVATION_CONTEXT,
-    DERIVATION_SYSTEM,
     DERIVATION_STEPS,
+    DERIVATION_SYSTEM,
     STEP_CONTEXT,
     run_derivation,
 )
-from amplitude_lab.llm import ScriptedLLM
-from amplitude_lab.task import Task
+from amplitude_lab.workflows.llm import ScriptedLLM
+from amplitude_lab.workflows.task import Task
 
 
 def test_derivation_requests_answer_then_audit_and_saves_report(tmp_path):

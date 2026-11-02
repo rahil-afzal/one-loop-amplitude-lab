@@ -1,6 +1,6 @@
 # Conventions
 
-All conventions are defined once in `src/amplitude_lab/conventions.py` and read at call
+All conventions are defined once in `src/amplitude_lab/physics/conventions.py` and read at call
 time. Change one there and the validation suite tells you what you broke.
 
 ## Theory

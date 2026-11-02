@@ -7,8 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, conventions
-from .amplitude import assemble
+from . import __version__
 from .assistant.client import GeminiClient
 from .assistant.config import GeminiConfig
 from .assistant.errors import (
@@ -17,16 +16,18 @@ from .assistant.errors import (
     AssistantUnavailableError,
 )
 from .assistant.mock import mock_client
-from .benchmarks import resolve
-from .derivation import run_derivation
-from .feedback import run_feedback_loop
-from .kinematics import Kinematics
-from .llm import LLMError, llm_from_env
+from .physics import conventions
+from .physics.amplitude import assemble
+from .physics.benchmarks import resolve
+from .physics.kinematics import Kinematics
 from .pipeline import run_pipeline
 from .reporting import write_json, write_markdown
-from .task import Task
 from .validation import list_checks, run_all
-from .verification import verify_final_answer
+from .workflows.derivation import run_derivation
+from .workflows.feedback import run_feedback_loop
+from .workflows.llm import LLMError, llm_from_env
+from .workflows.task import Task
+from .workflows.verification import verify_final_answer
 
 DERIVATION_MODEL = "anthropic/claude-sonnet-5.5"
 AUDIT_MODEL = "anthropic/claude-opus-5-5"

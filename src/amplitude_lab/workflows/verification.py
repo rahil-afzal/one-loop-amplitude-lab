@@ -21,11 +21,11 @@ from dataclasses import asdict, dataclass, field
 import mpmath as mp
 import sympy as sp
 
-from . import conventions
-from .amplitude import assemble
-from .assistant.safe_expr import CandidateParseError, parse_expression
-from .benchmarks import pure_phi4
-from .kinematics import Kinematics
+from ..assistant.safe_expr import CandidateParseError, parse_expression
+from ..physics import conventions
+from ..physics.amplitude import assemble
+from ..physics.benchmarks import pure_phi4
+from ..physics.kinematics import Kinematics
 
 _FENCE = re.compile(r"```final\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 KEYS = ("A_tree", "A_loop", "beta_c4")
@@ -184,4 +184,3 @@ def verify_final_answer(text: str) -> VerificationReport:
     if "beta_c4" in exprs:
         checks.append(check_beta(exprs["beta_c4"]))
     return VerificationReport(parsed, checks)
-

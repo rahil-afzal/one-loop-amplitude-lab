@@ -19,7 +19,7 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ..problem import ProblemSpec
+from ..physics.problem import ProblemSpec
 
 IMPLEMENTATION = "implementation"
 CONSISTENCY = "consistency"

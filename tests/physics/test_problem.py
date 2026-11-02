@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from amplitude_lab import benchmarks
-from amplitude_lab.problem import ProblemSpec
+from amplitude_lab.physics import benchmarks
+from amplitude_lab.physics.problem import ProblemSpec
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_roundtrip():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..problem import ProblemSpec
+from ..physics.problem import ProblemSpec
 from .client import AssistantClient
 from .errors import AssistantConfigError, AssistantRequestError, AssistantUnavailableError
 from .safe_expr import CandidateParseError

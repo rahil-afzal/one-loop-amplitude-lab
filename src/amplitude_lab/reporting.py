@@ -12,9 +12,10 @@ import numpy
 import scipy
 import sympy
 
-from . import __version__, conventions
+from . import __version__
 from .integrals.spec import massless_bubble
-from .problem import ProblemSpec
+from .physics import conventions
+from .physics.problem import ProblemSpec
 from .validation.base import CheckResult
 
 SCHEMA_VERSION = "1.0"

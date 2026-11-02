@@ -13,7 +13,7 @@ from typing import Protocol
 import sympy as sp
 
 from ..integrals.bubble import bubble_numeric_mpmath
-from ..problem import ProblemSpec
+from ..physics.problem import ProblemSpec
 from .safe_expr import evaluate, parse_expression
 
 

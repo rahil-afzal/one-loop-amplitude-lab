@@ -23,9 +23,9 @@ import mpmath as mp
 import sympy as sp
 from scipy.integrate import quad
 
+from ..integrals.bubble import feynman_integral_mp
 from .amplitude import forward_one_loop_imag
 from .crosssection import im_bubble_from_unitarity, sigma_tree
-from .integrals.bubble import feynman_integral_mp
 from .problem import ProblemSpec
 
 

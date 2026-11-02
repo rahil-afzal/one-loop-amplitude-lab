@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from amplitude_lab.benchmarks import resolve
+from amplitude_lab.physics.benchmarks import resolve
 
 
 @pytest.fixture
