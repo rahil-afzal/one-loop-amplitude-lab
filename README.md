@@ -31,37 +31,49 @@ python examples/quickstart.py
 For Gemini connectivity, install `.[gemini]`, set `GEMINI_API_KEY`, then use
 `python -m amplitude_lab smoke` or `run --assistant gemini`.
 
-## Analytical derivation
+## Autonomous derivation
 
-The separate `derive` workflow requests fourteen focused work steps, then a second-pass review.
-Only relevant completed work is supplied to each next step in a fresh request. The report
-assembles the saved steps directly, avoiding an extra model call that would only rephrase
-them. Prompts, step responses, metadata, and timings are stored in `runs/`, including
-completed steps if a later request fails. Both the derivation and review currently use
-`qwen/qwen-3.8-max`; the review is a second response
-from the same model, not an independent proof, and its text is **not** submitted to the
-deterministic verifier.
+`derive` asks the derivation model to make a task-specific plan, then proposes and audits
+each mathematical step independently. Accepted steps become checkpoints in a dependency
+graph. Rejected steps are revised; if an audit finds an earlier checkpoint is wrong, that
+step and its dependent work are invalidated and recomputed. Attempts, audit responses,
+backtracking, and deterministic checks are saved under `runs/`. A rejected or unresolved
+step is never silently accepted. The auditor receives no reference amplitude and is asked
+for diagnostics rather than a solution. The derivation agent has no web search or external
+answer source. Its planner selects a task-specific approach and reports its interpretation,
+strategy, and assumptions instead of forcing every problem through the same checklist.
 
-The fixed model ID is set in `src/amplitude_lab/cli.py`;
-`LLM_MODEL` and `LLM_AUDIT_MODEL` do not override them. Install `.[openai-compatible]`,
-copy `.env.example` to `.env`, and set `OPENAI_API_KEY`. The default endpoint is
-`https://tokens.bd/v1`; set `OPENAI_BASE_URL` for another compatible service.
+The `derive` command streams state and generated tokens to the terminal. Use
+`--jsonl-events` to consume the event stream programmatically. `python -m amplitude_lab serve`
+starts a loopback-only browser UI using server-sent events (SSE). The page presents the plan as
+step cards, keeps proposals separate from accepted derivation, and shows audit/backtracking
+history and deterministic checks in distinct sections. Raw SSE events remain available in a
+collapsed technical log for debugging.
+
+Install `.[openai-compatible]`, then configure `.env` from `.env.example`. By default, both
+roles share `OPENAI_API_KEY` and `OPENAI_BASE_URL`; their model IDs remain independently
+configurable as `DERIVATION_MODEL` and `AUDIT_MODEL`. If a role needs different credentials
+or an endpoint, optional `DERIVATION_API_KEY` / `DERIVATION_BASE_URL` and
+`AUDIT_API_KEY` / `AUDIT_BASE_URL` overrides are supported. `MAX_STEP_RETRIES` configures
+correction attempts (default 3); `STREAMING_ENABLED` enables provider token streaming. API
+keys remain on the server and are not included in prompts, reports, or SSE messages.
 
 ```powershell
-python -m amplitude_lab task --analytical
 python -m amplitude_lab derive
-python -m amplitude_lab derive --timeout-seconds 300
+python -m amplitude_lab derive --max-step-retries 4 --jsonl-events
+python -m amplitude_lab serve --port 8000
 ```
 
-Set `LLM_TIMEOUT_SECONDS` to tune request timeouts in `.env`; `--timeout-seconds` overrides it
-for one run. The default is 180 seconds. Set `OPENAI_STREAM=true` to consume streamed chunks
-from compatible endpoints; this can prevent idle gateway timeouts while the model is
-generating. Set it to `false` if the endpoint does not support streaming. Streaming does not
-override a provider's hard total-generation limit, so keep the client timeout longer than the
-expected request duration. `OPENAI_MAX_TOKENS` controls the completion token budget (default
-4096); increase it only if the endpoint/model allows it and the response ends with
-`finish_reason=length`. This is separate from the network timeout and streaming setting. This
-fixed-model derivation currently uses the OpenAI-compatible endpoint configured above.
+Set `LLM_TIMEOUT_SECONDS` to tune request timeouts; `--timeout-seconds` overrides it for one
+run. `OPENAI_MAX_TOKENS` controls the provider completion token budget. Streaming depends on
+the configured OpenAI-compatible endpoint's support; it does not override provider total
+generation limits. For tasks without a configured deterministic reference verifier, the
+result is explicitly labeled `completed_unverified`: an AI audit is not proof. For the
+included `phi4_dim4` task, the final result is compared against the repository's deterministic
+physics verifier. No live-model success is claimed until an actual model run has completed.
+Optional `DERIVATION_REASONING_EFFORT` and `AUDIT_REASONING_EFFORT` values are forwarded as
+the OpenAI-compatible `reasoning_effort` request parameter; leave them unset for providers
+that do not support it.
 
 ## Project layout
 

@@ -26,13 +26,22 @@ allowlist, then checks it against deterministic integral implementations. Assist
 are recorded separately and cannot change the deterministic report status. Its trust model
 and limitations are described in [ASSISTANT.md](ASSISTANT.md).
 
-`derive` requests a written derivation and a separate model audit. Those responses are saved
-for review, but prose is not executed or treated as validated physics. Use the deterministic
-commands and independent sources to verify any claimed result.
+`derive` asks the derivation model for a plan and then uses separate proposal and audit
+requests for every mathematical step. Accepted steps are checkpoints in a dependency graph;
+rejections trigger revision, and findings against accepted work invalidate dependent
+checkpoints. The complete event, attempt, audit, and backtracking history is persisted.
+The planner reports its task interpretation, selected approach, and assumptions, and only
+includes workflow steps that apply to the supplied problem. The optional `serve` command
+exposes these events through a readable loopback-only SSE interface, with proposals,
+accepted derivation, AI audit history, backtracking, and deterministic checks presented
+separately.
+Deterministic verification is reported separately from AI review; unsupported tasks are
+explicitly marked unverified.
 
 ## Iterative audit loop (`refine`) and deterministic verification
 
-`refine` runs derive -> audit -> revise for up to `--max-rounds` rounds
+`refine` retains the earlier whole-answer derive -> audit -> revise loop for up to
+`--max-rounds` rounds
 (`workflows/feedback.py`).
 
 - The derivation agent does the physics and must end with a ```final block giving

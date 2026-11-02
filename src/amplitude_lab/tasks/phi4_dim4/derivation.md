@@ -19,15 +19,15 @@ In the physical s-channel region, s is approached from above (s -> s+i0), while 
 negative real. Use the same Feynman prescription consistently when writing the analytic
 channel sum, and explain how its boundary values follow in this region.
 
-Follow the supplied derivation steps in order and do not jump ahead. At every loop stage,
-keep three objects distinct: the scalar integral with only denominator factors, the
-propagator factors of i, and the complete diagram including vertices and symmetry factor.
-Define notation before using it, carry signs and factors of i explicitly, and show the
-algebra connecting each stage instead of only stating a result. If prior work is inconsistent
-with the Lagrangian or a convention, return to that definition, identify the inconsistency,
-and do not silently propagate it.
+Determine a suitable derivation plan from the problem itself; no intermediate answers or
+prescribed calculation route are supplied. Work from the Lagrangian and stated assumptions.
+At loop stages, distinguish the denominator-only scalar integral, propagator factors of i,
+and the complete diagram including vertices and symmetry factors. Define notation before
+using it, carry signs and factors of i explicitly, and show checkable algebra connecting each
+stage. State assumptions or uncertainty rather than guessing.
 
 Return concise Markdown and LaTeX, not code or private chain-of-thought. Include enough
-intermediate equations for the result to be checked, and state assumptions or uncertainty
-instead of filling gaps with a memorized formula. Do not claim that a check was performed
-unless you show its evidence.
+intermediate equations for each result to be checked. Do not claim a check was performed
+unless you show its evidence. The final work step must end with a fenced `final` block with
+`A_tree`, `A_loop`, and `beta_c4` expressions in the safe arithmetic syntax if those
+quantities are applicable to this problem.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,14 +24,17 @@ from .physics.kinematics import Kinematics
 from .pipeline import run_pipeline
 from .reporting import write_json, write_markdown
 from .validation import list_checks, run_all
-from .workflows.derivation import run_derivation
+from .workflows.autonomous import run_autonomous_derivation
 from .workflows.feedback import run_feedback_loop
-from .workflows.llm import LLMError, llm_from_env
+from .workflows.llm import (
+    DEFAULT_AUDIT_MODEL,
+    DEFAULT_DERIVATION_MODEL,
+    LLMError,
+    role_llm_from_env,
+)
+from .workflows.server import serve
 from .workflows.task import Task
 from .workflows.verification import verify_final_answer
-
-DERIVATION_MODEL = "anthropic/claude-sonnet-5.5"
-AUDIT_MODEL = "anthropic/claude-opus-5-5"
 
 
 def _assistant_from_name(name):
@@ -135,49 +139,68 @@ def cmd_derive(args):
         print(f"error: task {task.name!r} has no analytical derivation prompt", file=sys.stderr)
         return 2
     try:
-        llm = llm_from_env(
-            provider="openai-compatible",
-            model=DERIVATION_MODEL,
+        derivation_llm = role_llm_from_env(
+            "derivation",
+            DEFAULT_DERIVATION_MODEL,
             temperature=args.temperature,
             timeout=args.timeout_seconds,
         )
-        audit_llm = llm_from_env(
-            provider="openai-compatible",
-            model=AUDIT_MODEL,
+        audit_llm = role_llm_from_env(
+            "audit",
+            DEFAULT_AUDIT_MODEL,
             temperature=args.temperature,
             timeout=args.timeout_seconds,
         )
+        max_retries = (
+            args.max_step_retries
+            if args.max_step_retries is not None
+            else int(os.environ.get("MAX_STEP_RETRIES", "3"))
+        )
+        if max_retries < 0:
+            raise ValueError("MAX_STEP_RETRIES must be non-negative.")
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
-    print(f"task {task.name}, model {llm.name}; audit model {audit_llm.name}")
-    result = run_derivation(task, llm, runs_dir=args.runs_dir, echo=print, audit_llm=audit_llm)
-    minutes, seconds = divmod(int(result.elapsed_seconds), 60)
-    elapsed_text = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
-    print(f"derivation workflow {result.status}; elapsed {elapsed_text}")
-    print(f"report: {Path(result.run_dir) / 'result.md'}")
-    if result.error:
-        return 1
-    print(
-        "All derivation steps and the audit response were received; "
-        "independently validate the result."
+    def show_event(event):
+        if args.jsonl_events:
+            print(json.dumps(event, ensure_ascii=False), flush=True)
+        elif event["type"] == "token":
+            print(event.get("text", ""), end="", flush=True)
+        else:
+            detail = event.get("diagnostic") or event.get("message") or event["type"]
+            step = f" ({event['step_id']})" if event.get("step_id") else ""
+            print(f"\n[{event['state']}] {detail}{step}", flush=True)
+
+    result = run_autonomous_derivation(
+        task,
+        derivation_llm,
+        audit_llm,
+        runs_dir=args.runs_dir,
+        max_step_retries=max_retries,
+        on_event=show_event,
     )
-    return 0
+    if not args.jsonl_events:
+        print(f"\nDerivation workflow {result.status}.")
+        print(f"Report: {Path(result.run_dir) / 'result.md'}")
+    return 0 if result.status in ("completed_verified", "completed_unverified") else 1
 
 
 def cmd_refine(args):
     try:
         task = Task.load(args.task)
-        llm = llm_from_env(
-            provider="openai-compatible",
-            model=DERIVATION_MODEL,
+        llm = role_llm_from_env(
+            "derivation",
+            DEFAULT_DERIVATION_MODEL,
             temperature=args.temperature,
             timeout=args.timeout_seconds,
         )
-        audit_llm = llm_from_env(
-            provider="openai-compatible",
-            model=AUDIT_MODEL,
+        audit_llm = role_llm_from_env(
+            "audit",
+            DEFAULT_AUDIT_MODEL,
             temperature=args.temperature,
             timeout=args.timeout_seconds,
         )
@@ -189,9 +212,20 @@ def cmd_refine(args):
         task, llm, audit_llm, runs_dir=args.runs_dir, max_rounds=args.max_rounds, echo=print
     )
     print(f"feedback loop {result.status}; rounds {len(result.rounds)}; report: {result.run_dir}")
-    print(f"deterministic verification of final round: "
-          f"{'PASS' if result.final_verification_passed else 'FAIL'}")
+    print(
+        f"deterministic verification of final round: "
+        f"{'PASS' if result.final_verification_passed else 'FAIL'}"
+    )
     return 0 if result.status != "failed" and result.final_verification_passed else 1
+
+
+def cmd_serve(args):
+    try:
+        serve(port=args.port)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 def cmd_verify(args):
@@ -242,7 +276,7 @@ def main(argv=None):
     task.set_defaults(func=cmd_task)
 
     derive = sub.add_parser(
-        "derive", help="derive an amplitude and request a second-pass model review"
+        "derive", help="autonomously derive and audit each step with live progress"
     )
     derive.add_argument("--task", default="phi4_dim4")
     derive.add_argument("--temperature", type=float, default=0.2)
@@ -253,7 +287,22 @@ def main(argv=None):
         help="request timeout; overrides LLM_TIMEOUT_SECONDS",
     )
     derive.add_argument("--runs-dir", default="runs")
+    derive.add_argument(
+        "--max-step-retries",
+        type=int,
+        default=None,
+        help="correction attempts per step; defaults to MAX_STEP_RETRIES or 3",
+    )
+    derive.add_argument(
+        "--jsonl-events",
+        action="store_true",
+        help="write the live event stream as JSON Lines to stdout",
+    )
     derive.set_defaults(func=cmd_derive)
+
+    web = sub.add_parser("serve", help="start the loopback live derivation SSE frontend")
+    web.add_argument("--port", type=int, default=8000)
+    web.set_defaults(func=cmd_serve)
 
     refine = sub.add_parser(
         "refine", help="derive, audit, revise in a loop; verify deterministically each round"

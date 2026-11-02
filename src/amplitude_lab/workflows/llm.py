@@ -9,6 +9,8 @@ class LLMError(RuntimeError):
 DEFAULT_OPENAI_BASE_URL = "https://tokens.bd/v1"
 DEFAULT_LLM_TIMEOUT = 180.0
 DEFAULT_OPENAI_MAX_TOKENS = 4096
+DEFAULT_DERIVATION_MODEL = "qwen/qwen-3.7-plus"
+DEFAULT_AUDIT_MODEL = "google/gemini-3.8-flash"
 
 
 class ScriptedLLM:
@@ -19,15 +21,23 @@ class ScriptedLLM:
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = []
+        self.systems = []
 
     def describe(self):
         return {"name": self.name}
 
     def complete(self, system, messages):
+        self.systems.append(system)
         self.calls.append([dict(m) for m in messages])
         if not self.replies:
             raise LLMError("scripted replies exhausted")
         return self.replies.pop(0)
+
+    def complete_stream(self, system, messages, on_token):
+        response = self.complete(system, messages)
+        for start in range(0, len(response), 12):
+            on_token(response[start : start + 12])
+        return response
 
 
 def _redact(text, secret):
@@ -96,6 +106,7 @@ class OpenAICompatibleLLM:
         timeout=DEFAULT_LLM_TIMEOUT,
         stream=False,
         max_tokens=DEFAULT_OPENAI_MAX_TOKENS,
+        reasoning_effort=None,
     ):
         if not api_key:
             raise LLMError("OPENAI_API_KEY is not set.")
@@ -110,6 +121,7 @@ class OpenAICompatibleLLM:
         self.timeout = timeout
         self.stream = stream
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.name = f"openai-compatible:{model}"
 
     @classmethod
@@ -126,6 +138,30 @@ class OpenAICompatibleLLM:
             max_tokens=_max_tokens_from_env(),
         )
 
+    @classmethod
+    def from_role_env(cls, role, default_model, temperature=0.2, timeout=None, use_dotenv=True):
+        if role not in ("derivation", "audit"):
+            raise ValueError(f"Unknown LLM role {role!r}.")
+        if use_dotenv:
+            _load_dotenv()
+        prefix = role.upper()
+        api_key = os.environ.get(f"{prefix}_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        model = os.environ.get(f"{prefix}_MODEL") or default_model
+        base_url = os.environ.get(f"{prefix}_BASE_URL") or os.environ.get(
+            "OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL
+        )
+        streaming = _bool_from_env("STREAMING_ENABLED", _bool_from_env("OPENAI_STREAM", True))
+        return cls(
+            api_key,
+            model,
+            base_url=base_url,
+            temperature=temperature,
+            timeout=_timeout_from_env(timeout=timeout),
+            stream=streaming,
+            max_tokens=_max_tokens_from_env(),
+            reasoning_effort=os.environ.get(f"{prefix}_REASONING_EFFORT") or None,
+        )
+
     def __repr__(self):
         return (
             f"OpenAICompatibleLLM(model={self.model!r}, base_url={self.base_url!r}, "
@@ -133,7 +169,7 @@ class OpenAICompatibleLLM:
         )
 
     def describe(self):
-        return {
+        description = {
             "name": self.name,
             "provider": "openai-compatible",
             "model": self.model,
@@ -143,8 +179,14 @@ class OpenAICompatibleLLM:
             "stream": self.stream,
             "max_tokens": self.max_tokens,
         }
+        if self.reasoning_effort:
+            description["reasoning_effort"] = self.reasoning_effort
+        return description
 
     def complete(self, system, messages):
+        return self.complete_stream(system, messages, lambda token: token)
+
+    def complete_stream(self, system, messages, on_token):
         try:
             from openai import OpenAI
         except ImportError:
@@ -161,13 +203,18 @@ class OpenAICompatibleLLM:
                 timeout=self.timeout,
                 max_retries=0,
             )
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": system}]
+            request = {
+                "model": self.model,
+                "messages": [{"role": "system", "content": system}]
                 + [{"role": message["role"], "content": message["text"]} for message in messages],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stream=self.stream,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "stream": self.stream,
+            }
+            if self.reasoning_effort:
+                request["reasoning_effort"] = self.reasoning_effort
+            response = client.chat.completions.create(
+                **request,
             )
             if self.stream:
                 content_parts = []
@@ -183,12 +230,16 @@ class OpenAICompatibleLLM:
                         content = getattr(delta, "content", None)
                         if isinstance(content, str):
                             content_parts.append(content)
+                            on_token(content)
                         elif isinstance(content, list):
-                            content_parts.extend(
+                            text_parts = [
                                 getattr(part, "text", "")
                                 for part in content
                                 if getattr(part, "type", None) == "text"
-                            )
+                            ]
+                            content_parts.extend(text_parts)
+                            for text in text_parts:
+                                on_token(text)
                 finally:
                     close = getattr(response, "close", None)
                     if callable(close):
@@ -223,6 +274,8 @@ class OpenAICompatibleLLM:
                 + detail
                 + "; check model ID and endpoint compatibility."
             )
+        if not self.stream:
+            on_token(content)
         return content.strip()
 
 
@@ -240,6 +293,17 @@ def llm_from_env(provider=None, model=None, temperature=0.2, timeout=None, use_d
             model=model, temperature=temperature, timeout=timeout, use_dotenv=False
         )
     raise LLMError(f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible' or 'gemini'.")
+
+
+def role_llm_from_env(role, default_model, temperature=0.2, timeout=None, use_dotenv=True):
+    """Create an independently configured OpenAI-compatible derivation or audit client."""
+    return OpenAICompatibleLLM.from_role_env(
+        role=role,
+        default_model=default_model,
+        temperature=temperature,
+        timeout=timeout,
+        use_dotenv=use_dotenv,
+    )
 
 
 def _response_reason(response):
@@ -272,7 +336,7 @@ class GeminiLLM:
     stub here, not the live API. Check the model name against the current model list.
     """
 
-    def __init__(self, api_key, model, temperature=0.7, timeout=120.0):
+    def __init__(self, api_key, model, temperature=0.7, timeout=120.0, stream=False):
         if not api_key:
             raise LLMError("GEMINI_API_KEY is not set (environment or .env)")
         if not model:
@@ -281,6 +345,7 @@ class GeminiLLM:
         self.model = model
         self.temperature = temperature
         self.timeout = timeout
+        self.stream = stream
         self.name = f"gemini:{model}"
 
     @classmethod
@@ -293,16 +358,25 @@ class GeminiLLM:
             model or os.environ.get("GEMINI_MODEL"),
             temperature=temperature,
             timeout=timeout,
+            stream=_bool_from_env("GEMINI_STREAM"),
         )
 
     def __repr__(self):
         return f"GeminiLLM(model={self.model!r})"
 
     def describe(self):
-        return {"name": self.name, "model": self.model, "temperature": self.temperature,
-                "timeout_s": self.timeout}  # fmt: skip
+        return {
+            "name": self.name,
+            "model": self.model,
+            "temperature": self.temperature,
+            "timeout_s": self.timeout,
+            "stream": self.stream,
+        }
 
     def complete(self, system, messages):
+        return self.complete_stream(system, messages, lambda token: token)
+
+    def complete_stream(self, system, messages, on_token):
         try:
             from google import genai
             from google.genai import types
@@ -320,14 +394,25 @@ class GeminiLLM:
                 )
                 for m in messages
             ]
-            response = client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system, temperature=self.temperature
-                ),
+            config = types.GenerateContentConfig(
+                system_instruction=system, temperature=self.temperature
             )
-            text = response.text
+            if self.stream:
+                parts = []
+                response = client.models.generate_content_stream(
+                    model=self.model, contents=contents, config=config
+                )
+                for chunk in response:
+                    text_part = getattr(chunk, "text", None)
+                    if text_part:
+                        parts.append(text_part)
+                        on_token(text_part)
+                text = "".join(parts)
+            else:
+                response = client.models.generate_content(
+                    model=self.model, contents=contents, config=config
+                )
+                text = response.text
         except Exception as exc:
             # the message can echo request details, so scrub the key and drop the chain
             raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
@@ -339,4 +424,6 @@ class GeminiLLM:
                 + detail
                 + "; check model access, safety filtering and generation limits."
             )
+        if not self.stream:
+            on_token(text)
         return text

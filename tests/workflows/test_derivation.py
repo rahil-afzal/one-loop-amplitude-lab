@@ -134,27 +134,30 @@ def test_derive_uses_fixed_models_and_tunable_timeout(monkeypatch, tmp_path, cap
             return cls()
 
     class FakeResult:
-        status = "completed"
-        elapsed_seconds = 3
+        status = "completed_verified"
         run_dir = str(tmp_path / "run")
         error = ""
 
     calls = {}
 
-    def fake_llm_from_env(**kwargs):
-        calls.setdefault("clients", []).append(kwargs)
+    def fake_role_llm_from_env(role, default_model, **kwargs):
+        calls.setdefault("clients", []).append(
+            {"role": role, "default_model": default_model, **kwargs}
+        )
         return FakeLLM()
 
-    monkeypatch.setattr("amplitude_lab.cli.llm_from_env", fake_llm_from_env)
+    monkeypatch.setattr("amplitude_lab.cli.role_llm_from_env", fake_role_llm_from_env)
 
-    def fake_run_derivation(task, llm, runs_dir, echo, audit_llm):
+    def fake_run_agent(task, derivation_llm, audit_llm, runs_dir, max_step_retries, on_event):
         calls["task"] = task
-        calls["llm"] = llm
+        calls["derivation_llm"] = derivation_llm
         calls["audit_llm"] = audit_llm
         calls["runs_dir"] = runs_dir
+        calls["max_step_retries"] = max_step_retries
         return FakeResult()
 
-    monkeypatch.setattr("amplitude_lab.cli.run_derivation", fake_run_derivation)
+    monkeypatch.setattr("amplitude_lab.cli.run_autonomous_derivation", fake_run_agent)
+    monkeypatch.setenv("MAX_STEP_RETRIES", "2")
     assert (
         main(
             [
@@ -163,54 +166,60 @@ def test_derive_uses_fixed_models_and_tunable_timeout(monkeypatch, tmp_path, cap
                 "45",
                 "--runs-dir",
                 str(tmp_path),
+                "--max-step-retries",
+                "4",
             ]
         )
         == 0
     )
     output = capsys.readouterr().out
-    assert "audit model" in output
+    assert "completed_verified" in output
     assert "result.md" in output
     assert calls["task"].derivation_prompt
     assert calls["runs_dir"] == str(tmp_path)
-    assert [client["provider"] for client in calls["clients"]] == [
-        "openai-compatible",
-        "openai-compatible",
-    ]
-    assert [client["model"] for client in calls["clients"]] == [
-        "qwen/qwen-3.8-max",
-        "qwen/qwen-3.8-max",
+    assert [client["role"] for client in calls["clients"]] == ["derivation", "audit"]
+    assert [client["default_model"] for client in calls["clients"]] == [
+        "qwen/qwen-3.7-plus",
+        "google/gemini-3.8-flash",
     ]
     assert [client["timeout"] for client in calls["clients"]] == [45.0, 45.0]
-    assert calls["audit_llm"] is not calls["llm"]
+    assert calls["audit_llm"] is not calls["derivation_llm"]
+    assert calls["max_step_retries"] == 4
 
 
 def test_derive_uses_timeout_from_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "70")
+    monkeypatch.setenv("MAX_STEP_RETRIES", "5")
     clients = []
+    retries = []
 
     class FakeLLM:
         def __init__(self, name):
             self.name = name
 
     class FakeResult:
-        status = "completed"
+        status = "completed_verified"
         elapsed_seconds = 3
         run_dir = str(tmp_path / "run")
         error = ""
 
-    def fake_llm_from_env(**kwargs):
-        clients.append(kwargs)
-        return FakeLLM(kwargs["model"] or "configured-primary")
+    def fake_role_llm_from_env(role, default_model, **kwargs):
+        clients.append({"role": role, "default_model": default_model, **kwargs})
+        return FakeLLM(default_model)
 
-    monkeypatch.setattr("amplitude_lab.cli.llm_from_env", fake_llm_from_env)
-    monkeypatch.setattr(
-        "amplitude_lab.cli.run_derivation",
-        lambda task, llm, runs_dir, echo, audit_llm: FakeResult(),
-    )
+    monkeypatch.setattr("amplitude_lab.cli.role_llm_from_env", fake_role_llm_from_env)
+
+    def fake_run_agent(task, derivation_llm, audit_llm, runs_dir, max_step_retries, on_event):
+        retries.append(max_step_retries)
+        return FakeResult()
+
+    monkeypatch.setattr("amplitude_lab.cli.run_autonomous_derivation", fake_run_agent)
 
     assert main(["derive", "--runs-dir", str(tmp_path)]) == 0
-    assert [client["model"] for client in clients] == [
-        "qwen/qwen-3.8-max",
-        "qwen/qwen-3.8-max",
-    ]
+    assert [client["role"] for client in clients] == ["derivation", "audit"]
     assert [client["timeout"] for client in clients] == [None, None]
+    assert [client["default_model"] for client in clients] == [
+        "qwen/qwen-3.7-plus",
+        "google/gemini-3.8-flash",
+    ]
+    assert retries == [5]

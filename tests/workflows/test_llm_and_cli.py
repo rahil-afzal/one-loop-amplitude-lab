@@ -10,6 +10,7 @@ from amplitude_lab.workflows.llm import (
     LLMError,
     OpenAICompatibleLLM,
     llm_from_env,
+    role_llm_from_env,
 )
 
 
@@ -62,6 +63,40 @@ def test_compatible_provider_config_from_env(monkeypatch):
     assert client.max_tokens == DEFAULT_OPENAI_MAX_TOKENS
     assert "gateway-secret" not in repr(client)
     assert "gateway-secret" not in str(client.describe())
+
+
+def test_role_clients_load_independent_credentials_models_and_urls(monkeypatch):
+    monkeypatch.setenv("DERIVATION_API_KEY", "derivation-secret")
+    monkeypatch.setenv("DERIVATION_MODEL", "provider/derive")
+    monkeypatch.setenv("DERIVATION_BASE_URL", "https://derive.example/v1")
+    monkeypatch.setenv("AUDIT_API_KEY", "audit-secret")
+    monkeypatch.setenv("AUDIT_MODEL", "provider/audit")
+    monkeypatch.setenv("AUDIT_BASE_URL", "https://audit.example/v1")
+    monkeypatch.setenv("DERIVATION_REASONING_EFFORT", "high")
+    monkeypatch.setenv("STREAMING_ENABLED", "true")
+    derivation = role_llm_from_env("derivation", "fallback/derive", use_dotenv=False)
+    audit = role_llm_from_env("audit", "fallback/audit", use_dotenv=False)
+
+    assert derivation.model == "provider/derive"
+    assert derivation.base_url == "https://derive.example/v1"
+    assert derivation._key == "derivation-secret"
+    assert derivation.reasoning_effort == "high"
+    assert audit.model == "provider/audit"
+    assert audit.base_url == "https://audit.example/v1"
+    assert audit._key == "audit-secret"
+    assert derivation.stream and audit.stream
+    assert "secret" not in repr(derivation) + repr(audit)
+
+
+def test_role_clients_fall_back_to_legacy_openai_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy.example/v1")
+    monkeypatch.setenv("STREAMING_ENABLED", "false")
+    client = role_llm_from_env("audit", "provider/audit", use_dotenv=False)
+    assert client.model == "provider/audit"
+    assert client.base_url == "https://legacy.example/v1"
+    assert client._key == "shared-key"
+    assert client.stream is False
 
 
 def test_explicit_timeout_overrides_environment(monkeypatch):
@@ -133,7 +168,11 @@ def test_compatible_provider_request_shape(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     client = OpenAICompatibleLLM(
-        "secret-token", "deepseek/deepseek-4.1-flash", temperature=0.1, timeout=180
+        "secret-token",
+        "deepseek/deepseek-4.1-flash",
+        temperature=0.1,
+        timeout=180,
+        reasoning_effort="high",
     )
     result = client.complete(
         "derive carefully",
@@ -156,6 +195,7 @@ def test_compatible_provider_request_shape(monkeypatch):
         "temperature": 0.1,
         "max_tokens": DEFAULT_OPENAI_MAX_TOKENS,
         "stream": False,
+        "reasoning_effort": "high",
     }
 
 
@@ -200,10 +240,12 @@ def test_compatible_provider_streaming_joins_content_and_closes_stream(monkeypat
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
     client = OpenAICompatibleLLM("secret-token", "provider/model", stream=True)
+    tokens = []
 
-    result = client.complete("system", [{"role": "user", "text": "prompt"}])
+    result = client.complete_stream("system", [{"role": "user", "text": "prompt"}], tokens.append)
 
     assert result == "derived result"
+    assert tokens == ["derived ", "result"]
     assert seen["request"]["stream"] is True
     assert client.describe()["stream"] is True
 

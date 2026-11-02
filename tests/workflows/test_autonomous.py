@@ -1,0 +1,274 @@
+import json
+from pathlib import Path
+
+from amplitude_lab.workflows.autonomous import parse_plan, run_autonomous_derivation
+from amplitude_lab.workflows.llm import LLMError, ScriptedLLM
+from amplitude_lab.workflows.task import Task
+
+GOOD = (
+    "Derivation and checks.\n"
+    "```final\n"
+    "A_tree = c4\n"
+    "A_loop = c4**2/(32*pi**2) * "
+    "(6 - log(-s/mu2) - log(-t/mu2) - log(-u/mu2))\n"
+    "beta_c4 = -3*c4**2/(16*pi**2)\n"
+    "```"
+)
+BAD = GOOD.replace("6 -", "3 -")
+
+
+def plan(*rows):
+    return json.dumps(
+        {
+            "interpretation": "The task requests a massless scalar 2-to-2 amplitude.",
+            "strategy": (
+                "Derive rules, enumerate contributing diagrams, then evaluate the amplitude."
+            ),
+            "assumptions": ["All external particles are on shell."],
+            "steps": [
+                {"id": step_id, "goal": goal, "depends_on": dependencies}
+                for step_id, goal, dependencies in rows
+            ]
+        }
+    )
+
+
+def audit(verdict="ACCEPT", target="final", diagnostic="The equations are consistent."):
+    return json.dumps({"verdict": verdict, "target_step_id": target, "diagnostic": diagnostic})
+
+
+def execute(tmp_path, derivation_replies, audit_replies, retries=3, on_event=None):
+    return run_autonomous_derivation(
+        Task.load("phi4_dim4"),
+        ScriptedLLM(derivation_replies),
+        ScriptedLLM(audit_replies),
+        runs_dir=tmp_path,
+        max_step_retries=retries,
+        on_event=on_event,
+    )
+
+
+def test_plan_requires_a_valid_dependency_order():
+    steps = parse_plan(plan(("rules", "derive rules", []), ("final", "derive answer", ["rules"])))
+    assert [step.id for step in steps] == ["rules", "final"]
+    try:
+        parse_plan(plan(("first", "derive", ["later"]), ("later", "derive", [])))
+    except ValueError as exc:
+        assert "earlier steps" in str(exc)
+    else:
+        raise AssertionError("forward dependency was accepted")
+
+
+def test_inconsistent_audit_target_cannot_accept_a_step():
+    from amplitude_lab.workflows.autonomous import _audit_response
+
+    verdict, target, diagnostic = _audit_response(
+        audit("ACCEPT", "earlier"),
+        {"earlier", "current"},
+        "current",
+    )
+    assert verdict == "UNCERTAIN"
+    assert target == "current"
+    assert "re-derive" in diagnostic
+
+
+def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
+    events = []
+    result = execute(
+        tmp_path,
+        [
+            plan(
+                ("rules", "derive Feynman rules", []),
+                ("final", "derive final amplitude", ["rules"]),
+            ),
+            "The rules follow by differentiating the interaction and kinetic terms.",
+            GOOD,
+        ],
+        [audit("ACCEPT", "rules"), audit("ACCEPT", "final")],
+        on_event=events.append,
+    )
+
+    assert result.status == "completed_verified"
+    assert result.verification["passed"] is True
+    assert result.interpretation.startswith("The task requests")
+    assert result.strategy.startswith("Derive rules")
+    assert result.assumptions == ["All external particles are on shell."]
+    assert "A_loop =" in result.final_amplitude
+    assert [step["step_id"] for step in result.accepted_steps] == ["rules", "final"]
+    assert any(event["type"] == "token" for event in events)
+    assert any(event["state"] == "awaiting_audit" for event in events)
+    assert any(event["type"] == "verification.finished" for event in events)
+    saved = Path(result.run_dir)
+    assert (saved / "events.jsonl").is_file()
+    assert json.loads((saved / "outcome.json").read_text())["status"] == "completed_verified"
+    report = (saved / "result.md").read_text()
+    assert "## Problem interpretation" in report
+    assert "## Selected approach" in report
+    assert "All external particles are on shell." in report
+    assert "Attempts and audit history" in report
+    assert "Deterministic verification" in report
+
+
+def test_rejection_returns_diagnostic_and_derivation_corrects_it(tmp_path):
+    result = execute(
+        tmp_path,
+        [plan(("final", "derive final amplitude", [])), BAD, GOOD],
+        [
+            audit("REJECT", "final", "Recheck the finite constant from the parameter integral."),
+            audit("ACCEPT", "final"),
+        ],
+        retries=1,
+    )
+    assert result.status == "completed_verified"
+    assert [attempt.status for attempt in result.attempts] == ["rejected", "accepted"]
+    history = (Path(result.run_dir) / "events.jsonl").read_text()
+    assert "Recheck the finite constant" in history
+    assert '"state": "revising"' in history
+
+
+def test_earlier_checkpoint_invalidates_dependent_work_and_backtracks(tmp_path):
+    result = execute(
+        tmp_path,
+        [
+            plan(
+                ("rules", "derive rules", []),
+                ("diagrams", "enumerate diagrams", ["rules"]),
+                ("final", "derive final amplitude", ["diagrams"]),
+            ),
+            "Incorrect initial convention.",
+            "Diagram count based on the initial convention.",
+            GOOD,
+            "Corrected convention derived from the Lagrangian.",
+            "Recomputed diagrams from corrected rules.",
+            GOOD,
+        ],
+        [
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "diagrams"),
+            audit("REJECT", "rules", "The vertex sign conflicts with the stated Lagrangian."),
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "diagrams"),
+            audit("ACCEPT", "final"),
+        ],
+    )
+    assert result.status == "completed_verified"
+    assert len(result.backtracking) == 1
+    assert result.backtracking[0].target_step_id == "rules"
+    assert result.backtracking[0].invalidated_steps == ["rules", "diagrams", "final"]
+    assert [row["content"] for row in result.accepted_steps] == [
+        "Corrected convention derived from the Lagrangian.",
+        "Recomputed diagrams from corrected rules.",
+        GOOD,
+    ]
+
+
+def test_retry_exhaustion_does_not_accept_unresolved_step(tmp_path):
+    result = execute(
+        tmp_path,
+        [plan(("final", "derive final amplitude", [])), BAD, BAD],
+        [
+            audit("REJECT", "final", "Unresolved coefficient mismatch."),
+            audit("REJECT", "final", "The same coefficient mismatch remains."),
+        ],
+        retries=1,
+    )
+    assert result.status == "retry_exhausted"
+    assert not result.accepted_steps
+    assert len(result.attempts) == 2
+    assert result.error
+
+
+def test_repeated_backtracking_obeys_retry_limit(tmp_path):
+    result = execute(
+        tmp_path,
+        [
+            plan(
+                ("rules", "derive rules", []),
+                ("final", "derive final amplitude", ["rules"]),
+            ),
+            "Initial rules.",
+            GOOD,
+            "Revised rules.",
+            GOOD,
+        ],
+        [
+            audit("ACCEPT", "rules"),
+            audit("REJECT", "rules", "The earlier vertex sign is inconsistent."),
+            audit("ACCEPT", "rules"),
+            audit("REJECT", "rules", "The revised vertex sign is still inconsistent."),
+        ],
+        retries=1,
+    )
+    assert result.status == "retry_exhausted"
+    assert "rules" in result.error
+    assert len(result.backtracking) == 2
+    assert not result.accepted_steps
+
+
+def test_deterministic_failure_rejects_auditor_accepted_final_and_retries(tmp_path):
+    result = execute(
+        tmp_path,
+        [plan(("final", "derive final amplitude", [])), BAD, GOOD],
+        [audit("ACCEPT", "final"), audit("ACCEPT", "final")],
+        retries=1,
+    )
+    assert result.status == "completed_verified"
+    assert result.attempts[0].status == "deterministic_rejection"
+    assert result.attempts[0].deterministic_checks["passed"] is False
+    assert result.attempts[1].deterministic_checks["passed"] is True
+
+
+def test_stream_callback_failure_is_reported_and_run_is_persisted(tmp_path):
+    class BrokenStream:
+        name = "broken-stream"
+        stream = True
+
+        def complete_stream(self, _system, _messages, on_token):
+            on_token("partial")
+            raise LLMError("provider stream disconnected")
+
+    events = []
+
+    def broken_sink(event):
+        events.append(event)
+        if event["type"] == "token":
+            raise RuntimeError("UI disconnected")
+
+    result = run_autonomous_derivation(
+        Task.load("phi4_dim4"),
+        BrokenStream(),
+        ScriptedLLM([]),
+        runs_dir=tmp_path,
+        on_event=broken_sink,
+    )
+    assert result.status == "failed"
+    assert "event stream callback failed" in result.error
+    assert (Path(result.run_dir) / "outcome.json").is_file()
+
+
+def test_provider_stream_failure_preserves_partial_attempt(tmp_path):
+    class BrokenStream:
+        name = "broken-provider"
+        stream = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete_stream(self, _system, _messages, on_token):
+            self.calls += 1
+            if self.calls == 1:
+                return plan(("final", "derive final amplitude", []))
+            on_token("partial derivation")
+            raise LLMError("provider stream disconnected")
+
+    derivation = BrokenStream()
+    result = run_autonomous_derivation(
+        Task.load("phi4_dim4"),
+        derivation,
+        ScriptedLLM([]),
+        runs_dir=tmp_path,
+    )
+    assert result.status == "failed"
+    assert "provider stream disconnected" in result.error
+    assert result.attempts[0].status == "generation_failed"
+    assert result.attempts[0].proposal == "partial derivation"
