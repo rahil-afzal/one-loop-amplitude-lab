@@ -33,12 +33,15 @@ For Gemini connectivity, install `.[gemini]`, set `GEMINI_API_KEY`, then use
 
 ## Autonomous derivation
 
-`derive` asks the derivation model to make a task-specific plan, then proposes and audits
-each mathematical step independently. Accepted steps become checkpoints in a dependency
-graph. Rejected steps are revised; if an audit finds an earlier checkpoint is wrong, that
-step and its dependent work are invalidated and recomputed. Attempts, audit responses,
-backtracking, and deterministic checks are saved under `runs/`. A rejected or unresolved
-step is never silently accepted. The auditor receives no reference amplitude and is asked
+`derive` asks the derivation model to formulate the theory's Lagrangian and make a
+task-specific plan, then proposes and audits each mathematical step independently. The
+Lagrangian is established as the first auditable step. Accepted steps become checkpoints in
+a dependency graph. Rejected steps are revised; if an audit finds an earlier checkpoint is
+wrong, that step and its dependent work are invalidated and recomputed. Attempts, audit
+responses, backtracking, and deterministic checks are saved as Markdown under `runs/`
+(`response.md`, `steps.md`, and `result.md`); live events are streamed but not persisted as
+a separate JSON Lines file. A rejected or unresolved step is never silently accepted. The
+auditor receives no reference amplitude and is asked
 for diagnostics rather than a solution. The derivation agent has no web search or external
 answer source. Its planner selects a task-specific approach and reports its interpretation,
 strategy, and assumptions instead of forcing every problem through the same checklist.
@@ -48,7 +51,12 @@ The `derive` command streams state and generated tokens to the terminal. Use
 starts a loopback-only browser UI using server-sent events (SSE). The page presents the plan as
 step cards, keeps proposals separate from accepted derivation, and shows audit/backtracking
 history and deterministic checks in distinct sections. Raw SSE events remain available in a
-collapsed technical log for debugging.
+collapsed technical log for debugging. While the planner is running, the UI shows elapsed wait
+time; providers can take time before sending their first visible token, and this does not expose
+hidden model reasoning. Derivation steps request intermediate equations, explanations of signs
+and factors, and relevant checks so the Markdown response is more useful than a final-formula
+dump. The final UI reports the run's `response.md` and
+`steps.md` files, saved alongside the full audit report in its run directory.
 
 Install `.[openai-compatible]`, then configure `.env` from `.env.example`. By default, both
 roles share `OPENAI_API_KEY` and `OPENAI_BASE_URL`; their model IDs remain independently
@@ -74,6 +82,12 @@ physics verifier. No live-model success is claimed until an actual model run has
 Optional `DERIVATION_REASONING_EFFORT` and `AUDIT_REASONING_EFFORT` values are forwarded as
 the OpenAI-compatible `reasoning_effort` request parameter; leave them unset for providers
 that do not support it.
+
+OpenAI-compatible requests retry transient provider errors up to two times. If all attempts
+fail, the run report and UI retain the provider error and suggest checking service status,
+model availability, and endpoint configuration before retrying. Audit JSON is shown in
+`result.md` and `steps.md` as a readable verdict, target, and explanation; the original
+response remains available in `outcome.json`.
 
 ## Project layout
 

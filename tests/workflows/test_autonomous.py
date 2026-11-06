@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from amplitude_lab.workflows.autonomous import parse_plan, run_autonomous_derivation
+from amplitude_lab.workflows.autonomous import (
+    DERIVATION_SYSTEM,
+    PlanError,
+    _format_audit_response,
+    _plan_overview,
+    parse_plan,
+    run_autonomous_derivation,
+)
 from amplitude_lab.workflows.llm import LLMError, ScriptedLLM
 from amplitude_lab.workflows.task import Task
 
@@ -21,13 +28,22 @@ def plan(*rows):
     return json.dumps(
         {
             "interpretation": "The task requests a massless scalar 2-to-2 amplitude.",
+            "lagrangian": "$\\mathcal{L}=\\frac12(\\partial\\phi)^2+\\frac{c_4}{4!}\\phi^4$",
             "strategy": (
                 "Derive rules, enumerate contributing diagrams, then evaluate the amplitude."
             ),
             "assumptions": ["All external particles are on shell."],
             "steps": [
-                {"id": step_id, "goal": goal, "depends_on": dependencies}
-                for step_id, goal, dependencies in rows
+                {
+                    "id": step_id,
+                    "goal": (
+                        f"Establish and justify the Lagrangian; {goal}"
+                        if index == 0 and "lagrangian" not in goal.casefold()
+                        else goal
+                    ),
+                    "depends_on": dependencies,
+                }
+                for index, (step_id, goal, dependencies) in enumerate(rows)
             ]
         }
     )
@@ -59,6 +75,31 @@ def test_plan_requires_a_valid_dependency_order():
         raise AssertionError("forward dependency was accepted")
 
 
+def test_derivation_prompt_requests_checkable_intermediate_explanations():
+    assert "key intermediate equations in order" in DERIVATION_SYSTEM
+    assert "relevant check or limitation" in DERIVATION_SYSTEM
+    assert "Do not provide private chain-of-thought" in DERIVATION_SYSTEM
+
+
+def test_plan_requires_agent_defined_lagrangian():
+    payload = json.loads(plan(("final", "derive final amplitude", [])))
+    del payload["lagrangian"]
+    try:
+        _plan_overview(json.dumps(payload))
+    except PlanError as exc:
+        assert "explicit Lagrangian" in str(exc)
+    else:
+        raise AssertionError("planner response without a Lagrangian was accepted")
+
+
+def test_first_plan_step_must_establish_lagrangian(tmp_path):
+    payload = json.loads(plan(("rules", "derive Feynman rules", [])))
+    payload["steps"][0]["goal"] = "Derive Feynman rules"
+    result = execute(tmp_path, [json.dumps(payload)], [])
+    assert result.status == "failed"
+    assert "first plan step must establish" in result.error
+
+
 def test_inconsistent_audit_target_cannot_accept_a_step():
     from amplitude_lab.workflows.autonomous import _audit_response
 
@@ -70,6 +111,21 @@ def test_inconsistent_audit_target_cannot_accept_a_step():
     assert verdict == "UNCERTAIN"
     assert target == "current"
     assert "re-derive" in diagnostic
+
+
+def test_audit_json_is_rendered_as_readable_markdown():
+    response = (
+        '```json\n{"verdict":"REJECT","target_step_id":"rules",'
+        '"diagnostic":"The sign in $S_0$ is inconsistent. Re-derive it."}\n```'
+    )
+
+    rendered = _format_audit_response(response)
+
+    assert "**Verdict:** REJECT" in rendered
+    assert "**Review target:** `rules`" in rendered
+    assert "**Auditor's explanation:**" in rendered
+    assert "The sign in $S_0$ is inconsistent. Re-derive it." in rendered
+    assert "```json" not in rendered
 
 
 def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
@@ -91,6 +147,7 @@ def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
     assert result.status == "completed_verified"
     assert result.verification["passed"] is True
     assert result.interpretation.startswith("The task requests")
+    assert result.lagrangian.startswith("$\\mathcal{L}")
     assert result.strategy.startswith("Derive rules")
     assert result.assumptions == ["All external particles are on shell."]
     assert "A_loop =" in result.final_amplitude
@@ -99,7 +156,7 @@ def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
     assert any(event["state"] == "awaiting_audit" for event in events)
     assert any(event["type"] == "verification.finished" for event in events)
     saved = Path(result.run_dir)
-    assert (saved / "events.jsonl").is_file()
+    assert not (saved / "events.jsonl").exists()
     assert json.loads((saved / "outcome.json").read_text())["status"] == "completed_verified"
     report = (saved / "result.md").read_text()
     assert "## Problem interpretation" in report
@@ -107,6 +164,14 @@ def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
     assert "All external particles are on shell." in report
     assert "Attempts and audit history" in report
     assert "Deterministic verification" in report
+    assert "**Verdict:** ACCEPT" in report
+    assert "```json" not in report
+    response = (saved / "response.md").read_text()
+    assert "## Proposed Lagrangian and conventions" in response
+    assert "## Derivation" in response
+    assert "## Result" in response
+    assert "A_loop =" in response
+    assert (saved / "steps.md").is_file()
 
 
 def test_rejection_returns_diagnostic_and_derivation_corrects_it(tmp_path):
@@ -121,9 +186,10 @@ def test_rejection_returns_diagnostic_and_derivation_corrects_it(tmp_path):
     )
     assert result.status == "completed_verified"
     assert [attempt.status for attempt in result.attempts] == ["rejected", "accepted"]
-    history = (Path(result.run_dir) / "events.jsonl").read_text()
-    assert "Recheck the finite constant" in history
-    assert '"state": "revising"' in history
+    assert not (Path(result.run_dir) / "events.jsonl").exists()
+    steps = (Path(result.run_dir) / "steps.md").read_text()
+    assert "Recheck the finite constant" in steps
+    assert "rejected" in steps
 
 
 def test_earlier_checkpoint_invalidates_dependent_work_and_backtracks(tmp_path):

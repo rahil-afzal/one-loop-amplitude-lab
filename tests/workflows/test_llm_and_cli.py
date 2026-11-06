@@ -5,6 +5,7 @@ import pytest
 
 from amplitude_lab.workflows.llm import (
     DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MAX_RETRIES,
     DEFAULT_OPENAI_MAX_TOKENS,
     GeminiLLM,
     LLMError,
@@ -183,7 +184,7 @@ def test_compatible_provider_request_shape(monkeypatch):
         "api_key": "secret-token",
         "base_url": "https://tokens.bd/v1",
         "timeout": 180,
-        "max_retries": 0,
+        "max_retries": DEFAULT_OPENAI_MAX_RETRIES,
     }
     assert seen["request"] == {
         "model": "deepseek/deepseek-4.1-flash",
@@ -197,6 +198,29 @@ def test_compatible_provider_request_shape(monkeypatch):
         "stream": False,
         "reasoning_effort": "high",
     }
+
+
+def test_compatible_provider_upstream_error_has_retry_guidance(monkeypatch):
+    class APIError(Exception):
+        pass
+
+    class Completions:
+        def create(self, **_kwargs):
+            raise APIError("The upstream AI provider encountered an error. Please retry shortly.")
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
+    client = OpenAICompatibleLLM("secret-token", "provider/model")
+
+    with pytest.raises(LLMError) as error:
+        client.complete("system", [{"role": "user", "text": "prompt"}])
+
+    assert "retries transient provider errors up to 2 times" in str(error.value)
+    assert "check the provider's status" in str(error.value)
+    assert "secret-token" not in str(error.value)
 
 
 def test_compatible_provider_streaming_joins_content_and_closes_stream(monkeypatch):

@@ -16,30 +16,41 @@ from .verification import verify_final_answer
 PLAN_SYSTEM = (
     "You are a research-planning assistant for quantum field theory. Read only the supplied "
     "problem and identify the theory, requested quantity, and assumptions that affect the "
-    "derivation. Select a suitable approach rather than forcing a fixed checklist: include "
+    "derivation. Formulate the theory's explicit Lagrangian from its name and stated "
+    "conventions; do not require the user to provide the full Lagrangian. If the theory does "
+    "not determine it uniquely, make the ambiguity explicit in assumptions. The first plan "
+    "step must establish and justify this Lagrangian so it can be independently audited. "
+    "Select a suitable approach rather than forcing a fixed checklist: include "
     "kinematics, Feynman rules, diagrams, symmetry factors, loop integration, regularization, "
     "renormalization, crossing, or other work only when applicable to this problem. Make the "
-    "plan dependency-ordered, specific, and complete enough to derive and check the requested "
-    "2-to-2 amplitude. Do not solve any step, state expected answers, or use external sources, "
+    "plan dependency-ordered and complete enough to derive and check the requested quantity, "
+    "using 5-12 concise steps and keeping the interpretation and strategy to 1-3 sentences each. "
+    "Do not solve any step, state expected answers, or use external sources, "
     "web search, or other models. Avoid private chain-of-thought; give only a concise "
     "interpretation and approach summary in Markdown. Delimit inline mathematics with `$...$` "
     "and displayed equations with `$$...$$`. Output only JSON with shape "
-    '{"interpretation":"problem and requested quantity","strategy":"chosen approach",'
+    '{"interpretation":"problem and requested quantity","lagrangian":"explicit proposed '
+    'Lagrangian and conventions","strategy":"chosen approach",'
     '"assumptions":["explicit assumption"],"steps":[{"id":"short_id",'
     '"goal":"one mathematical deliverable","depends_on":["earlier_id"]}]} . '
-    "Use 1-30 steps and an empty assumptions list when none are needed."
+    "Use 5-12 steps and an empty assumptions list when none are needed."
 )
 
 DERIVATION_SYSTEM = (
     "You are an independent quantum field theory derivation agent. Derive only the requested "
-    "mathematical step from the supplied Lagrangian, assumptions, and accepted dependency "
-    "checkpoints. Do not assume a target amplitude or quote an unsupported remembered result. "
-    "You have no web search, external solutions, or other LLM assistance. Show concise, "
-    "checkable equations, state conventions and relevant assumptions, and explain how the "
-    "result meets this step's goal. Format the response as concise Markdown and delimit inline "
-    "mathematics with `$...$` and displayed equations with `$$...$$`; do not provide private "
-    "chain-of-thought. Do not silently accept reviewer feedback: independently recompute the "
-    "affected step."
+    "mathematical step from the planner's proposed Lagrangian, assumptions, and accepted "
+    "dependency checkpoints. For the Lagrangian-establishing step, independently derive and "
+    "justify the Lagrangian from the named theory and conventions; flag ambiguity rather than "
+    "silently accepting an unsupported choice. Do not assume a target amplitude or quote an "
+    "unsupported remembered result. You have no web search, external solutions, or other LLM "
+    "assistance. Provide useful, checkable explanations rather than only a final formula: identify "
+    "the goal and definitions, show the key intermediate equations in order, explain where signs, "
+    "factors, substitutions, and assumptions enter, then state the result and a relevant check or "
+    "limitation. Include enough algebra for a reader to verify the result without filling in a "
+    "major skipped step. Give substantial calculations more detail than simple bookkeeping steps. "
+    "Format as clear Markdown with headings when helpful; delimit inline mathematics with `$...$` "
+    "and displayed equations with `$$...$$`. Do not provide private chain-of-thought. Do not "
+    "silently accept reviewer feedback: independently recompute the affected step."
 )
 
 AUDIT_SYSTEM = (
@@ -98,6 +109,7 @@ class AutonomousResult:
     audit_model: str
     plan: list[dict] = field(default_factory=list)
     interpretation: str = ""
+    lagrangian: str = ""
     strategy: str = ""
     assumptions: list[str] = field(default_factory=list)
     attempts: list[StepAttempt] = field(default_factory=list)
@@ -150,16 +162,19 @@ def parse_plan(text: str) -> list[DerivationStep]:
     return steps
 
 
-def _plan_overview(text: str) -> tuple[str, str, list[str]]:
+def _plan_overview(text: str) -> tuple[str, str, str, list[str]]:
     try:
         payload = _json_object(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise PlanError(f"derivation plan is not valid JSON: {exc}") from None
     interpretation = payload.get("interpretation", "")
+    lagrangian = payload.get("lagrangian", "")
     strategy = payload.get("strategy", "")
     assumptions = payload.get("assumptions", [])
     if not isinstance(interpretation, str) or len(interpretation) > 2000:
         raise PlanError("plan interpretation must be text of at most 2000 characters")
+    if not isinstance(lagrangian, str) or not lagrangian.strip() or len(lagrangian) > 4000:
+        raise PlanError("plan must provide an explicit Lagrangian of at most 4000 characters")
     if not isinstance(strategy, str) or len(strategy) > 2000:
         raise PlanError("plan strategy must be text of at most 2000 characters")
     if (
@@ -171,7 +186,12 @@ def _plan_overview(text: str) -> tuple[str, str, list[str]]:
         )
     ):
         raise PlanError("plan assumptions must be up to 20 non-empty strings of at most 500 chars")
-    return interpretation.strip(), strategy.strip(), [item.strip() for item in assumptions]
+    return (
+        interpretation.strip(),
+        lagrangian.strip(),
+        strategy.strip(),
+        [item.strip() for item in assumptions],
+    )
 
 
 def _audit_response(text: str, valid_targets: set[str], current_id: str) -> tuple[str, str, str]:
@@ -201,6 +221,29 @@ def _audit_response(text: str, valid_targets: set[str], current_id: str) -> tupl
     return verdict, target, diagnostic.strip()
 
 
+def _format_audit_response(text: str) -> str:
+    if not text.strip():
+        return "No complete audit response was recorded."
+    try:
+        payload = _json_object(text)
+    except (json.JSONDecodeError, ValueError):
+        return text
+
+    sections = []
+    verdict = payload.get("verdict")
+    target = payload.get("target_step_id")
+    diagnostic = payload.get("diagnostic")
+    if isinstance(verdict, str):
+        sections.append(f"**Verdict:** {verdict}")
+    if isinstance(target, str):
+        sections.append(f"**Review target:** `{target}`")
+    if isinstance(diagnostic, str):
+        sections.extend(["", "**Auditor's explanation:**", "", diagnostic or "No explanation supplied."])
+    if not sections:
+        return text
+    return "\n".join(sections)
+
+
 def _complete(llm, system, messages, on_token: Callable[[str], None]) -> str:
     stream = getattr(llm, "complete_stream", None)
     if callable(stream):
@@ -228,8 +271,7 @@ def _token_handler(log, state: str, agent: str, step_id: str | None = None, part
 
 
 class _RunLog:
-    def __init__(self, path: Path, on_event: Callable[[dict], None] | None):
-        self.path = path
+    def __init__(self, on_event: Callable[[dict], None] | None):
         self.on_event = on_event
         self.lock = threading.Lock()
 
@@ -241,16 +283,13 @@ class _RunLog:
             **data,
         }
         with self.lock:
-            with (self.path / "events.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
-                handle.flush()
-        if self.on_event is not None:
-            try:
-                self.on_event(event)
-            except Exception as exc:
-                self.on_event = None
-                message = f"event stream callback failed: {type(exc).__name__}: {exc}"
-                raise LLMError(message) from None
+            if self.on_event is not None:
+                try:
+                    self.on_event(event)
+                except Exception as exc:
+                    self.on_event = None
+                    message = f"event stream callback failed: {type(exc).__name__}: {exc}"
+                    raise LLMError(message) from None
 
 
 def _descendants(step_id: str, steps: list[DerivationStep]) -> set[str]:
@@ -276,6 +315,10 @@ def _render_report(result: AutonomousResult) -> str:
         "## Problem interpretation",
         "",
         result.interpretation or "Not supplied by the planner.",
+        "",
+        "## Planner-proposed Lagrangian",
+        "",
+        result.lagrangian or "Not supplied by the planner.",
         "",
         "## Selected approach",
         "",
@@ -310,7 +353,7 @@ def _render_report(result: AutonomousResult) -> str:
                 "",
                 "Auditor response:",
                 "",
-                attempt.audit_response or "(no complete audit response)",
+                _format_audit_response(attempt.audit_response),
                 "",
                 "Proposal:",
                 "",
@@ -352,6 +395,10 @@ def _render_steps_report(result: AutonomousResult) -> str:
         "",
         result.interpretation or "Not supplied by the planner.",
         "",
+        "## Planner-proposed Lagrangian",
+        "",
+        result.lagrangian or "Not supplied by the planner.",
+        "",
         "## Selected approach",
         "",
         result.strategy or "Not supplied by the planner.",
@@ -373,7 +420,7 @@ def _render_steps_report(result: AutonomousResult) -> str:
         )
         if row:
             sections.extend(["### Accepted result", "", row["content"], ""])
-            sections.extend(["### AI audit", "", row["audit"] or "No audit response.", ""])
+            sections.extend(["### AI audit", "", _format_audit_response(row["audit"]), ""])
         for attempt in attempts_by_step.get(step_id, []):
             sections.extend(
                 [
@@ -389,7 +436,7 @@ def _render_steps_report(result: AutonomousResult) -> str:
                     "",
                     "#### Audit response",
                     "",
-                    attempt.audit_response or "No complete audit response.",
+                    _format_audit_response(attempt.audit_response),
                     "",
                 ]
             )
@@ -419,10 +466,46 @@ def _render_steps_report(result: AutonomousResult) -> str:
     return "\n".join(sections)
 
 
+def _render_response(result: AutonomousResult) -> str:
+    sections = [
+        f"# Derivation response: {result.task}",
+        "",
+        f"- Status: **{result.status}**",
+        "",
+        "## Problem",
+        "",
+        result.interpretation or "No problem interpretation was produced.",
+        "",
+        "## Proposed Lagrangian and conventions",
+        "",
+        result.lagrangian or "No Lagrangian was produced.",
+        "",
+        "## Derivation",
+        "",
+    ]
+    if result.accepted_steps:
+        sections.extend(
+            f"### {row['goal']}\n\n{row['content']}\n"
+            for row in result.accepted_steps
+        )
+    else:
+        sections.append("No derivation steps were accepted.")
+    sections.extend(["## Result", "", result.final_amplitude or "No final result was accepted."])
+    if result.verification:
+        passed = result.verification.get("passed")
+        status = "passed" if passed is True else "failed" if passed is False else "unavailable"
+        sections.extend(["", f"Verification: **{status}**."])
+    if result.error:
+        sections.extend(["", f"Workflow error: {result.error}"])
+    sections.append("")
+    return "\n".join(sections)
+
+
 def _write_markdown_reports(result: AutonomousResult) -> None:
     run_dir = Path(result.run_dir)
     (run_dir / "result.md").write_text(_render_report(result), encoding="utf-8")
     (run_dir / "steps.md").write_text(_render_steps_report(result), encoding="utf-8")
+    (run_dir / "response.md").write_text(_render_response(result), encoding="utf-8")
 
 
 def run_autonomous_derivation(
@@ -446,7 +529,7 @@ def run_autonomous_derivation(
         suffix += 1
         run_dir = Path(runs_dir) / f"{stamp}-{task.name}-agent-{suffix}"
     run_dir.mkdir(parents=True)
-    log = _RunLog(run_dir, on_event)
+    log = _RunLog(on_event)
     result = AutonomousResult(
         task=task.name,
         status="failed",
@@ -499,9 +582,12 @@ def run_autonomous_derivation(
         steps = parse_plan(plan_text)
         (
             result.interpretation,
+            result.lagrangian,
             result.strategy,
             result.assumptions,
         ) = _plan_overview(plan_text)
+        if "lagrangian" not in steps[0].goal.casefold():
+            raise PlanError("first plan step must establish and justify the Lagrangian")
         step_by_id = {step.id: step for step in steps}
         pending = [step.id for step in steps]
         result.plan = [asdict(step) for step in steps]
@@ -511,6 +597,7 @@ def run_autonomous_derivation(
             "plan.ready",
             "generating",
             interpretation=result.interpretation,
+            lagrangian=result.lagrangian,
             strategy=result.strategy,
             assumptions=result.assumptions,
             steps=result.plan,
@@ -536,6 +623,7 @@ def run_autonomous_derivation(
             ]
             prompt = {
                 "problem": task.derivation_prompt,
+                "planner_lagrangian": result.lagrangian,
                 "current_step": {"id": step.id, "goal": step.goal},
                 "accepted_dependencies": dependencies,
                 "reviewer_diagnostic_to_recheck_independently": prior_feedback,
@@ -591,6 +679,7 @@ def run_autonomous_derivation(
             ]
             audit_prompt = {
                 "problem": task.derivation_prompt,
+                "planner_lagrangian": result.lagrangian,
                 "current_step": {"id": step.id, "goal": step.goal, "proposal": proposal},
                 "accepted_checkpoints": accepted_context,
                 "instruction": (

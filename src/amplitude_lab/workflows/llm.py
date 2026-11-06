@@ -9,6 +9,7 @@ class LLMError(RuntimeError):
 DEFAULT_OPENAI_BASE_URL = "https://tokens.bd/v1"
 DEFAULT_LLM_TIMEOUT = 180.0
 DEFAULT_OPENAI_MAX_TOKENS = 4096
+DEFAULT_OPENAI_MAX_RETRIES = 2
 DEFAULT_DERIVATION_MODEL = "qwen/qwen-3.7-plus"
 DEFAULT_AUDIT_MODEL = "google/gemini-3.8-flash"
 
@@ -201,7 +202,7 @@ class OpenAICompatibleLLM:
                 api_key=self._key,
                 base_url=self.base_url,
                 timeout=self.timeout,
-                max_retries=0,
+                max_retries=DEFAULT_OPENAI_MAX_RETRIES,
             )
             request = {
                 "model": self.model,
@@ -258,7 +259,23 @@ class OpenAICompatibleLLM:
                         if getattr(part, "type", None) == "text"
                     )
         except Exception as exc:
-            raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
+            message = _redact(f"{type(exc).__name__}: {exc}", self._key)
+            if (
+                type(exc).__name__ in {
+                    "APIError",
+                    "APIConnectionError",
+                    "APITimeoutError",
+                    "InternalServerError",
+                    "RateLimitError",
+                }
+                or "upstream ai provider encountered an error" in message.lower()
+            ):
+                message += (
+                    " The client retries transient provider errors up to "
+                    f"{DEFAULT_OPENAI_MAX_RETRIES} times. If this persists, check the "
+                    "provider's status, model availability, and configured endpoint, then retry."
+                )
+            raise LLMError(message) from None
 
         if finish_reason == "length":
             raise LLMError(

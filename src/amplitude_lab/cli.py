@@ -186,6 +186,7 @@ def cmd_derive(args):
     if not args.jsonl_events:
         print(f"\nDerivation workflow {result.status}.")
         print(f"Report: {Path(result.run_dir) / 'result.md'}")
+        print(f"Response: {Path(result.run_dir) / 'response.md'}")
     return 0 if result.status in ("completed_verified", "completed_unverified") else 1
 
 

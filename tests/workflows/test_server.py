@@ -22,6 +22,10 @@ def test_sse_frontend_streams_background_run_events(monkeypatch):
         page = urlopen(base_url, timeout=3).read().decode()
         assert "EventSource" in page
         assert "Problem interpretation &amp; approach" in page
+        assert "startPlanningTimer" in page
+        assert "Waiting for planner output" in page
+        assert "Planner-proposed Lagrangian" in page
+        assert "response.md" in page
         assert "Accepted derivation" in page
         assert "Deterministic verification" in page
         assert "Technical event log (raw SSE)" in page

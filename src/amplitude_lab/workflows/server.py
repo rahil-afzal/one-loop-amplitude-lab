@@ -339,6 +339,7 @@ details>summary{cursor:pointer;color:var(--accent)}
         its interpretation, assumptions, and selected approach here.</div>
       <div id="overview" hidden>
         <h3>Interpretation</h3><div id="interpretation" class="markdown"></div>
+        <h3>Planner-proposed Lagrangian</h3><div id="lagrangian" class="markdown"></div>
         <h3>Selected approach</h3><div id="strategy" class="markdown"></div>
         <div id="assumptions-wrap"><h3>Assumptions</h3><ul id="assumptions"></ul></div>
       </div>
@@ -359,6 +360,7 @@ details>summary{cursor:pointer;color:var(--accent)}
         <button id="copy-final" type="button" disabled>Copy</button></div>
       <div id="final-amplitude" class="final-box empty">The final result will appear
         when the run finishes.</div>
+      <p id="run-artifacts" class="hint"></p>
     </section>
     <section class="panel" aria-labelledby="verification-heading">
       <h2 id="verification-heading">Deterministic verification</h2>
@@ -391,11 +393,30 @@ const terminalStates=new Set([
   "completed_verified","completed_unverified","failed","retry_exhausted"
 ]);
 let source=null, plan=[], steps=new Map(), accepted=new Map();
-let planTokens="", runStatus="idle";
+let runStatus="idle";
+let planningTimer=null;
 const text=(tag,value,className="")=>{
   const node=document.createElement(tag); if(className) node.className=className;
   node.textContent=value||""; return node;
 };
+function stopPlanningTimer(){
+  if(planningTimer!==null){clearInterval(planningTimer);planningTimer=null;}
+}
+function startPlanningTimer(){
+  stopPlanningTimer();
+  const started=Date.now();
+  const update=()=>{
+    const elapsed=Math.floor((Date.now()-started)/1000);
+    const duration=elapsed<60?elapsed+"s":Math.floor(elapsed/60)+"m "+elapsed%60+"s";
+    document.querySelector("#planning-state").textContent=
+      "Waiting for planner output · "+duration;
+    document.querySelector("#planning-preview").textContent=elapsed<15?
+      "Planner request sent; waiting for the first visible response.":
+      "The model/provider may be preparing its first visible response. Hidden reasoning is not available in the stream.";
+  };
+  update();
+  planningTimer=setInterval(update,1000);
+}
 const MATH_NS="http://www.w3.org/1998/Math/MathML";
 const greek={alpha:"α",beta:"β",gamma:"γ",delta:"δ",epsilon:"ϵ",varepsilon:"ε",
   theta:"θ",lambda:"λ",mu:"μ",nu:"ν",pi:"π",rho:"ρ",sigma:"σ",tau:"τ",phi:"ϕ",
@@ -779,8 +800,12 @@ function handleEvent(item){
   const finished=terminalStates.has(item.state);
   if(item.type==="token"){
     if(item.state==="planning"){
-      planTokens+=item.text||"";
-      document.querySelector("#planning-preview").textContent=planTokens;
+      if(planningTimer!==null){
+        stopPlanningTimer();
+        document.querySelector("#planning-state").textContent="Planner response streaming";
+        document.querySelector("#planning-preview").textContent=
+          "Planner response is arriving. The structured interpretation and plan will appear when complete.";
+      }
     }else if(item.step_id){
       const step=ensureStep(item.step_id), attempt=currentAttempt(step);
       if(item.agent==="audit") attempt.auditText+=item.text||"";
@@ -789,9 +814,11 @@ function handleEvent(item){
     }
   }else{
     if(item.type==="plan.ready"){
+      stopPlanningTimer();
       plan=item.steps||[];
       steps=new Map(plan.map(row=>[row.id,{...row,state:"pending",attempts:[]}]));
       document.querySelector("#interpretation").textContent=item.interpretation||"Not supplied.";
+      document.querySelector("#lagrangian").textContent=item.lagrangian||"Not supplied.";
       document.querySelector("#strategy").textContent=item.strategy||"Not supplied.";
       const assumptions=document.querySelector("#assumptions");
       assumptions.replaceChildren();
@@ -801,7 +828,7 @@ function handleEvent(item){
       document.querySelector("#planning-preview").hidden=true;
       document.querySelector("#planning-state").textContent="Plan ready";
     }else if(item.type==="plan.started"){
-      document.querySelector("#planning-state").textContent="Interpreting problem";
+      startPlanningTimer();
     }else if(item.step_id&&item.type==="step.generating"){
       const step=ensureStep(item.step_id); step.state="generating";
       step.goal=item.goal||step.goal;
@@ -835,7 +862,14 @@ function handleEvent(item){
     }else if(item.type==="verification.finished"){
       renderVerification({available:true,passed:item.passed,checks:item.checks});
     }else if(item.type==="derivation.completed"||item.type==="run.done"){
+      stopPlanningTimer();
       const result=item.result||item;
+      if(result.run_dir){
+        const runDir=result.run_dir.replaceAll("\\\\","/");
+        document.querySelector("#run-artifacts").textContent=
+          "Markdown reports: "+runDir+"/response.md, "+
+          runDir+"/steps.md, and "+runDir+"/result.md";
+      }
       if(result.final_amplitude){
         const output=document.querySelector("#final-amplitude");
         output.className="final-box";output.textContent=result.final_amplitude;
@@ -851,6 +885,7 @@ function handleEvent(item){
         renderAccepted();
       }
     }else if(item.type==="derivation.failed"||item.type==="server.failed"){
+      stopPlanningTimer();
       document.querySelector("#final-amplitude").textContent=item.error||"Run failed.";
     }
     if(item.type!=="plan.ready"&&
@@ -868,7 +903,8 @@ document.querySelector("#copy-final").addEventListener("click",async()=>{
 });
 form.addEventListener("submit",async event=>{
   event.preventDefault();if(source)source.close();
-  plan=[];steps=new Map();accepted=new Map();planTokens="";
+  stopPlanningTimer();
+  plan=[];steps=new Map();accepted=new Map();
   activity.replaceChildren(text("li","Run events will appear here.","empty"));
   technicalLog.textContent="";document.querySelector("#overview").hidden=true;
   document.querySelector("#planning-preview").hidden=false;
@@ -879,6 +915,7 @@ form.addEventListener("submit",async event=>{
   document.querySelector("#final-amplitude").textContent=
     "The final result will appear when the run finishes.";
   document.querySelector("#final-amplitude").className="final-box empty";
+  document.querySelector("#run-artifacts").textContent="";
   document.querySelector("#copy-final").disabled=true;
   renderVerification(null);renderPlan();setStatus("planning");
   connection.textContent="Starting run…";

@@ -1,15 +1,15 @@
 # Analytical amplitude derivation: massless real scalar phi^4
 
 Derive the analytical 2 -> 2 scattering amplitude through order c4^2 for one real massless
-scalar from first principles, starting with
-
-    L = 1/2 (d phi)^2 + c4/4! phi^4
-
-using metric (+,-,-,-). Define iA as the sum of connected, amputated diagrams. Use
-dimensional regularization with d = 4 - 2 epsilon and renormalize in the MS-bar scheme at
-scale mu, with mu2 = mu^2. The task does not supply the Feynman rules or the target amplitude:
-derive them from the Lagrangian and the stated conventions rather than quoting a remembered
-formula.
+scalar from first principles. Define the theory's full Lagrangian yourself from the named
+theory and these conventions: use a canonical kinetic term, no mass term, and define c4 as
+the coefficient of phi^4/4! in the Lagrangian. State the resulting Lagrangian and justify
+the field content and terms before deriving its Feynman rules. The Lagrangian expression is
+deliberately not supplied. Use metric (+,-,-,-). Define iA as the sum of connected,
+amputated diagrams. Use dimensional regularization with d = 4 - 2 epsilon and renormalize in
+the MS-bar scheme at scale mu, with mu2 = mu^2. The task does not supply the Feynman rules
+or the target amplitude: derive them from the Lagrangian and stated conventions rather than
+quoting a remembered formula.
 
 For phi(p1) phi(p2) -> phi(p3) phi(p4), use
 
