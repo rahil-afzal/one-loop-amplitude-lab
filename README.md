@@ -73,7 +73,8 @@ python -m amplitude_lab serve --port 8000
 ```
 
 Set `LLM_TIMEOUT_SECONDS` to tune request timeouts; `--timeout-seconds` overrides it for one
-run. `OPENAI_MAX_TOKENS` controls the provider completion token budget. Streaming depends on
+run. `OPENAI_MAX_TOKENS` controls the requested completion token limit (default 128,000);
+the provider or model may enforce a lower maximum. Streaming depends on
 the configured OpenAI-compatible endpoint's support; it does not override provider total
 generation limits. For tasks without a configured deterministic reference verifier, the
 result is explicitly labeled `completed_unverified`: an AI audit is not proof. For the
