@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 
 from amplitude_lab.workflows.autonomous import (
+    AUDIT_SYSTEM,
     DERIVATION_SYSTEM,
     PlanError,
+    _audit_response,
     _format_audit_response,
     _plan_overview,
     parse_plan,
@@ -76,9 +78,42 @@ def test_plan_requires_a_valid_dependency_order():
 
 
 def test_derivation_prompt_requests_checkable_intermediate_explanations():
-    assert "key intermediate equations in order" in DERIVATION_SYSTEM
-    assert "relevant check or limitation" in DERIVATION_SYSTEM
+    assert "essential intermediate equations" in DERIVATION_SYSTEM
+    assert "Avoid repeating the problem" in DERIVATION_SYSTEM
+    assert "dimensional or limiting-case sanity check" in DERIVATION_SYSTEM
+    assert "notation contract in the accepted checkpoints" in DERIVATION_SYSTEM
+    assert "checkpoint" in DERIVATION_SYSTEM
+    assert "Revision notes" in DERIVATION_SYSTEM
     assert "Do not provide private chain-of-thought" in DERIVATION_SYSTEM
+
+
+def test_audit_prompt_and_response_use_scoped_text_format():
+    assert "Audit only this step's stated goal and deliverables" in AUDIT_SYSTEM
+    assert "VERDICT: ACCEPT|REJECT" in AUDIT_SYSTEM
+    response = (
+        "VERDICT: REJECT\n"
+        "PREVIOUS: none\n"
+        "BLOCKING: sign | eq. (3) | sign conflicts with convention | re-derive sign\n"
+        "MINOR: none\n"
+        "INVALIDATE: current\n"
+    )
+    verdict, target, diagnostic = _audit_response(response, {"current"}, "current")
+    assert verdict == "REJECT"
+    assert target == "current"
+    assert "sign conflicts with convention" in diagnostic
+
+
+def test_audit_text_format_rejects_acceptance_with_blocking_issue():
+    response = (
+        "VERDICT: ACCEPT\n"
+        "PREVIOUS: none\n"
+        "BLOCKING: sign | eq. (3) | inconsistent | re-derive\n"
+        "MINOR: none\n"
+        "INVALIDATE: none\n"
+    )
+    verdict, target, _ = _audit_response(response, {"current"}, "current")
+    assert verdict == "UNCERTAIN"
+    assert target == "current"
 
 
 def test_plan_requires_agent_defined_lagrangian():
@@ -172,6 +207,49 @@ def test_success_streams_and_saves_audited_deterministic_result(tmp_path):
     assert "## Result" in response
     assert "A_loop =" in response
     assert (saved / "steps.md").is_file()
+
+
+def test_step_prompts_reuse_compact_context_and_only_relevant_checkpoints(tmp_path):
+    task = Task(
+        "context_reuse",
+        "UNIQUE_RAW_REQUIREMENT: derive the scalar amplitude with the stated convention.",
+    )
+    derivation_llm = ScriptedLLM(
+        [
+            plan(
+                ("rules", "derive the Lagrangian and Feynman rules", []),
+                ("unrelated", "derive an independent auxiliary result", []),
+                ("final", "derive the final amplitude", ["rules"]),
+            ),
+            "Lagrangian and rules checkpoint.",
+            "Independent auxiliary checkpoint.",
+            GOOD,
+        ]
+    )
+    audit_llm = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "unrelated"),
+            audit("ACCEPT", "final"),
+        ]
+    )
+
+    result = run_autonomous_derivation(
+        task, derivation_llm, audit_llm, runs_dir=tmp_path
+    )
+
+    assert result.status == "completed_unverified"
+    first_step_prompt = json.loads(derivation_llm.calls[1][0]["text"])
+    later_step_prompt = json.loads(derivation_llm.calls[3][0]["text"])
+    assert first_step_prompt["original_problem"] == task.derivation_prompt
+    assert "original_problem" not in later_step_prompt
+    assert "UNIQUE_RAW_REQUIREMENT" not in derivation_llm.calls[3][0]["text"]
+
+    final_audit_prompt = json.loads(audit_llm.calls[2][0]["text"])
+    assert "UNIQUE_RAW_REQUIREMENT" not in audit_llm.calls[2][0]["text"]
+    assert [row["step_id"] for row in final_audit_prompt["accepted_checkpoints"]] == [
+        "rules"
+    ]
 
 
 def test_rejection_returns_diagnostic_and_derivation_corrects_it(tmp_path):

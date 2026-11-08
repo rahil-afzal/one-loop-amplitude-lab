@@ -180,7 +180,7 @@ def test_derive_uses_fixed_models_and_tunable_timeout(monkeypatch, tmp_path, cap
     assert [client["role"] for client in calls["clients"]] == ["derivation", "audit"]
     assert [client["default_model"] for client in calls["clients"]] == [
         "qwen/qwen-3.7-plus",
-        "google/gemini-3.8-flash",
+        "claude-haiku-5-5",
     ]
     assert [client["timeout"] for client in calls["clients"]] == [45.0, 45.0]
     assert calls["audit_llm"] is not calls["derivation_llm"]
@@ -220,6 +220,6 @@ def test_derive_uses_timeout_from_environment(monkeypatch, tmp_path):
     assert [client["timeout"] for client in clients] == [None, None]
     assert [client["default_model"] for client in clients] == [
         "qwen/qwen-3.7-plus",
-        "google/gemini-3.8-flash",
+        "claude-haiku-5-5",
     ]
     assert retries == [5]

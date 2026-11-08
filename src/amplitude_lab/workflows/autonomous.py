@@ -33,7 +33,14 @@ PLAN_SYSTEM = (
     'Lagrangian and conventions","strategy":"chosen approach",'
     '"assumptions":["explicit assumption"],"steps":[{"id":"short_id",'
     '"goal":"one mathematical deliverable","depends_on":["earlier_id"]}]} . '
-    "Use 5-12 steps and an empty assumptions list when none are needed."
+    "Use 5-12 steps and an empty assumptions list when none are needed. Make the first step "
+    "establish the Lagrangian and a short notation contract: define the denominator-only "
+    "integral, specify where mu^{2 eps} and coupling factors live, and state sign/i conventions "
+    "for A, Disc, and the i0 prescription. Define every object used by multiple steps in an "
+    "earlier step, and make that defining step a dependency of every step that uses the object. "
+    "Do not create independent steps that compute the same quantity. Put physics cross-checks "
+    "(optical theorem, crossing, mu-independence) in a late dedicated step, not inside "
+    "derivation steps. Only the last step produces the final answer block."
 )
 
 DERIVATION_SYSTEM = (
@@ -43,26 +50,42 @@ DERIVATION_SYSTEM = (
     "justify the Lagrangian from the named theory and conventions; flag ambiguity rather than "
     "silently accepting an unsupported choice. Do not assume a target amplitude or quote an "
     "unsupported remembered result. You have no web search, external solutions, or other LLM "
-    "assistance. Provide useful, checkable explanations rather than only a final formula: identify "
-    "the goal and definitions, show the key intermediate equations in order, explain where signs, "
-    "factors, substitutions, and assumptions enter, then state the result and a relevant check or "
-    "limitation. Include enough algebra for a reader to verify the result without filling in a "
-    "major skipped step. Give substantial calculations more detail than simple bookkeeping steps. "
-    "Format as clear Markdown with headings when helpful; delimit inline mathematics with `$...$` "
-    "and displayed equations with `$$...$$`. Do not provide private chain-of-thought. Do not "
-    "silently accept reviewer feedback: independently recompute the affected step."
+    "assistance. Be concise but checkable: state definitions needed, show essential intermediate "
+    "equations, explain non-obvious signs or factors, then give the result and a dimensional or "
+    "limiting-case sanity check. Full physics cross-checks belong to a later step. Avoid repeating "
+    "the problem or adding lengthy prose; expand only enough to "
+    "verify nontrivial algebra and do not skip essential steps. Use clear Markdown and delimit "
+    "inline mathematics with `$...$` and displayed equations with `$$...$$`. Do not provide "
+    "private chain-of-thought. Always obey the notation contract in the accepted checkpoints; "
+    "never redefine a symbol they define. Compute scratch work silently and never write "
+    "retractions ('wait', 'let me redo'); show only the clean chain. End with a `checkpoint` "
+    "block listing this step's key results; emit a `final` block only if the task says this is "
+    "the last step. REVISION MODE: if you are given a previous proposal and audit issues, treat "
+    "the issues as the work list. Re-derive each flagged item from scratch, independently, "
+    "without assuming the auditor is right or wrong. Items not flagged stay unchanged unless "
+    "the re-derivation forces a change; if it does, say so in one line. Output the full clean "
+    "step, then a short 'Revision notes' section: one line per issue id saying what you "
+    "re-derived and whether the result changed."
 )
 
 AUDIT_SYSTEM = (
-    "You are a skeptical quantum field theory auditor. Audit the proposed step's mathematics, "
-    "physical assumptions, signs, factors of i, coefficients, dimensions, integrations, "
-    "whether the proposal actually satisfies its stated goal, consistency with the problem, "
-    "and accepted checkpoints. Do not solve the step or give a corrected formula. Return a "
-    "targeted diagnostic identifying what to re-derive. If an accepted earlier checkpoint is "
-    "wrong, identify its step ID so that it and dependent work can be invalidated. Avoid private "
-    "chain-of-thought. Output only JSON with shape "
-    '{"verdict":"ACCEPT or REJECT","target_step_id":"step_id",'
-    '"diagnostic":"brief evidence and next thing to re-derive"}.'
+    "You are a skeptical but scoped quantum field theory auditor. Audit only this step's stated "
+    "goal and deliverables against the accepted checkpoints. You may recompute key quantities "
+    "privately to verify them, but never supply a corrected formula; point to the exact equation, "
+    "say what is inconsistent, and say what to re-derive. Classify each issue as BLOCKING (changes "
+    "a result, a sign, a factor of i, a coefficient, a power of mu, violates the stated goal or the "
+    "notation contract, or contains an unresolved retraction) or MINOR (presentation or optional "
+    "improvement). Do not raise issues that belong to other steps; if an accepted checkpoint is "
+    "wrong, report it separately with its step ID. You are given your previous issues: first "
+    "state, for each, RESOLVED or STILL OPEN with evidence. Do not introduce new blocking "
+    "issues on parts you already passed unless a change made them wrong. ACCEPT if there are no "
+    "blocking issues. Output exactly:\n"
+    "VERDICT: ACCEPT|REJECT\n"
+    "PREVIOUS: <id>: RESOLVED|OPEN: <evidence>   (one per line, or 'none')\n"
+    "BLOCKING: <id> | <equation/location> | <what is inconsistent> | <what to re-derive>   (one per line, or 'none')\n"
+    "MINOR: <id> | <note>   (one per line, or 'none')\n"
+    "INVALIDATE: <accepted step id or 'none'>\n"
+    "Write math in plain text without backslashes."
 )
 
 _STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -198,7 +221,9 @@ def _audit_response(text: str, valid_targets: set[str], current_id: str) -> tupl
     try:
         payload = _json_object(text)
     except (json.JSONDecodeError, ValueError):
-        return "UNCERTAIN", current_id, "Audit response was not valid JSON; re-derive this step."
+        payload = None
+    if payload is None:
+        return _structured_audit_response(text, valid_targets, current_id)
     verdict = payload.get("verdict")
     target = payload.get("target_step_id")
     diagnostic = payload.get("diagnostic")
@@ -219,6 +244,48 @@ def _audit_response(text: str, valid_targets: set[str], current_id: str) -> tupl
     if not isinstance(diagnostic, str) or not diagnostic.strip():
         return "UNCERTAIN", current_id, "Audit omitted its diagnostic; re-derive this step."
     return verdict, target, diagnostic.strip()
+
+
+def _structured_audit_response(
+    text: str, valid_targets: set[str], current_id: str
+) -> tuple[str, str, str]:
+    verdict_match = re.search(r"(?m)^VERDICT:\s*(ACCEPT|REJECT)\s*$", text)
+    invalidate_match = re.search(r"(?m)^INVALIDATE:\s*(\S+)\s*$", text)
+    if verdict_match is None or invalidate_match is None:
+        return "UNCERTAIN", current_id, "Audit response did not match the required format."
+
+    verdict = verdict_match.group(1)
+    target = invalidate_match.group(1)
+    if target.casefold() == "none":
+        target = current_id
+    elif target not in valid_targets:
+        return (
+            "UNCERTAIN",
+            current_id,
+            "Audit invalidation target was not the current step or an accepted checkpoint.",
+        )
+    if verdict == "ACCEPT" and target != current_id:
+        return (
+            "UNCERTAIN",
+            current_id,
+            "Audit accepted the current step but targeted an earlier checkpoint.",
+        )
+
+    blocking = re.findall(r"(?m)^BLOCKING:\s*(?!none\s*$)(.+)$", text)
+    if verdict == "ACCEPT" and blocking:
+        return "UNCERTAIN", current_id, "Audit accepted the step while reporting blocking issues."
+    if verdict == "REJECT" and not blocking:
+        return "UNCERTAIN", current_id, "Audit rejected the step without reporting a blocking issue."
+
+    previous_open = re.findall(r"(?m)^PREVIOUS:\s*(.+)$", text)
+    previous_open = [
+        issue for issue in previous_open if re.search(r":\s*(?:STILL OPEN|OPEN)\s*:", issue)
+    ]
+    minor = re.findall(r"(?m)^MINOR:\s*(?!none\s*$)(.+)$", text)
+    diagnostics = blocking + previous_open + minor
+    if not diagnostics:
+        diagnostics = ["Audit accepted the step with no blocking issues."]
+    return verdict, target, "\n".join(diagnostics)
 
 
 def _format_audit_response(text: str) -> str:
@@ -302,6 +369,17 @@ def _descendants(step_id: str, steps: list[DerivationStep]) -> set[str]:
                 invalid.add(step.id)
                 changed = True
     return invalid
+
+
+def _ancestors(step_id: str, step_by_id: dict[str, DerivationStep]) -> set[str]:
+    ancestors = set()
+    pending = list(step_by_id[step_id].depends_on)
+    while pending:
+        dependency = pending.pop()
+        if dependency not in ancestors:
+            ancestors.add(dependency)
+            pending.extend(step_by_id[dependency].depends_on)
+    return ancestors
 
 
 def _render_report(result: AutonomousResult) -> str:
@@ -622,12 +700,18 @@ def run_autonomous_derivation(
                 for dependency in step.depends_on
             ]
             prompt = {
-                "problem": task.derivation_prompt,
+                "problem_context": {
+                    "interpretation": result.interpretation,
+                    "assumptions": result.assumptions,
+                    "strategy": result.strategy,
+                },
                 "planner_lagrangian": result.lagrangian,
                 "current_step": {"id": step.id, "goal": step.goal},
                 "accepted_dependencies": dependencies,
                 "reviewer_diagnostic_to_recheck_independently": prior_feedback,
             }
+            if step_id == steps[0].id:
+                prompt["original_problem"] = task.derivation_prompt
             log.emit(
                 "step.generating",
                 "generating",
@@ -668,6 +752,7 @@ def run_autonomous_derivation(
                 )
                 raise LLMError(f"Derivation agent returned an empty step for {step_id!r}.")
             log.emit("step.awaiting_audit", "awaiting_audit", step_id=step_id)
+            relevant_checkpoint_ids = _ancestors(step_id, step_by_id)
             accepted_context = [
                 {
                     "step_id": item.id,
@@ -675,10 +760,14 @@ def run_autonomous_derivation(
                     "content": accepted[item.id]["content"],
                 }
                 for item in steps
-                if item.id in accepted and "content" in accepted[item.id]
+                if item.id in relevant_checkpoint_ids and item.id in accepted
             ]
             audit_prompt = {
-                "problem": task.derivation_prompt,
+                "problem_context": {
+                    "interpretation": result.interpretation,
+                    "assumptions": result.assumptions,
+                    "strategy": result.strategy,
+                },
                 "planner_lagrangian": result.lagrangian,
                 "current_step": {"id": step.id, "goal": step.goal, "proposal": proposal},
                 "accepted_checkpoints": accepted_context,
@@ -720,9 +809,7 @@ def run_autonomous_derivation(
                     )
                 )
                 raise LLMError(f"Audit agent returned an empty response for {step_id!r}.")
-            valid_targets = {
-                key for key, checkpoint in accepted.items() if "content" in checkpoint
-            } | {step_id}
+            valid_targets = relevant_checkpoint_ids | {step_id}
             verdict, target_id, diagnostic = _audit_response(audit_response, valid_targets, step_id)
             log.emit(
                 "step.audit",
