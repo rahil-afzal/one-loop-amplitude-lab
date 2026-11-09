@@ -133,6 +133,15 @@ def test_first_plan_step_must_establish_lagrangian(tmp_path):
     result = execute(tmp_path, [json.dumps(payload)], [])
     assert result.status == "failed"
     assert "first plan step must establish" in result.error
+    assert "Derive Feynman rules" in result.error
+    assert (tmp_path / "plan_raw.md").exists()
+
+
+def test_first_plan_step_accepts_action_phrasing(tmp_path):
+    payload = json.loads(plan(("rules", "derive Feynman rules", [])))
+    payload["steps"][0]["goal"] = "Write the action S = int(1/2 (dphi)^2 - c4/4! phi^4) and fix conventions"
+    result = execute(tmp_path, [json.dumps(payload)], [])
+    assert "first plan step must establish" not in (result.error or "")
 
 
 def test_inconsistent_audit_target_cannot_accept_a_step():
