@@ -7,6 +7,6 @@
 - Twelve deterministic checks with stratified evidence kinds; negative-control tests.
 - Brute-force Wick-contraction enumeration for symmetry factors.
 - Unitarity cut, optical theorem, bubble dispersion relation, dim-4 `Sigma` (3 routes).
-- Optional Gemini assistant behind a strict AST whitelist and deterministic verifier;
+- Optional OpenAI-compatible assistant workflows behind strict parsing and deterministic verification;
   offline mock assistants; credential redaction.
-- CLI (`run`, `validate`, `amplitude`, `describe`, `list-checks`, `smoke`), JSON + Markdown reports.
+- CLI (`run`, `validate`, `amplitude`, `describe`, `list-checks`), JSON + Markdown reports.

@@ -54,19 +54,6 @@ def test_mock_wrong_reported_but_does_not_fail_run(tmp_path):
     assert report["assistant"][0]["status"] == "rejected"
 
 
-def test_missing_key_exit_code_and_no_secret_leak(tmp_path, capsys):
-    code = main(["run", "--assistant", "gemini", "--out-dir", str(tmp_path)])
-    captured = capsys.readouterr()
-    assert code == 2
-    assert "GEMINI_API_KEY" in captured.err
-    assert not (tmp_path / "run.json").exists()
-
-
-def test_smoke_without_key_exits_two(capsys):
-    assert main(["smoke"]) == 2
-    assert "GEMINI_API_KEY" in capsys.readouterr().err
-
-
 def test_validate_command(capsys):
     assert main(["validate", "--problem", "pure_phi4", "--only", "amplitude_crossing"]) == 0
     assert "amplitude_crossing" in capsys.readouterr().out

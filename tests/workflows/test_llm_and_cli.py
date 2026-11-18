@@ -7,47 +7,11 @@ from amplitude_lab.workflows.llm import (
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MAX_RETRIES,
     DEFAULT_OPENAI_MAX_TOKENS,
-    GeminiLLM,
     LLMError,
     OpenAICompatibleLLM,
     llm_from_env,
     role_llm_from_env,
 )
-
-
-def test_gemini_needs_key_and_model():
-    with pytest.raises(LLMError, match="GEMINI_API_KEY"):
-        GeminiLLM(None, "m")
-    with pytest.raises(LLMError, match="GEMINI_MODEL"):
-        GeminiLLM("k", None)
-
-
-def test_key_not_in_repr_or_description():
-    llm = GeminiLLM("secret-key", "m", temperature=0.3)
-    assert "secret-key" not in repr(llm) and "secret-key" not in str(llm.describe())
-    assert llm.describe()["temperature"] == 0.3 and llm.describe()["model"] == "m"
-
-
-def test_gemini_timeout_from_env(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_MODEL", "m")
-    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", "300")
-    assert GeminiLLM.from_env(use_dotenv=False).timeout == 300
-
-
-def test_gemini_default_timeout_is_unchanged(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_MODEL", "m")
-    assert GeminiLLM.from_env(use_dotenv=False).timeout == 120
-
-
-@pytest.mark.parametrize("bad", ["abc", "0", "-3", "nan", "inf", "-inf"])
-def test_gemini_bad_timeout_from_env_rejected(monkeypatch, bad):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_MODEL", "m")
-    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", bad)
-    with pytest.raises(LLMError, match="LLM_TIMEOUT_SECONDS"):
-        GeminiLLM.from_env(use_dotenv=False)
 
 
 def test_compatible_provider_config_from_env(monkeypatch):
@@ -378,79 +342,3 @@ def test_compatible_provider_rejects_truncated_nonempty_response(monkeypatch):
         )
 
 
-def test_sdk_error_is_scrubbed(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-
-    class Boom:
-        def __init__(self, *a, **k):
-            raise RuntimeError("bad request, key=secret-key")
-
-    monkeypatch.setattr(genai, "Client", Boom)
-    with pytest.raises(LLMError) as exc:
-        GeminiLLM("secret-key", "m").complete("sys", [{"role": "user", "text": "hi"}])
-    assert "secret-key" not in str(exc.value) and exc.value.__cause__ is None
-
-
-def test_request_shape(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-    seen = {}
-
-    class Models:
-        def generate_content(self, **kw):
-            seen.update(kw)
-            return type("R", (), {"text": "ok"})()
-
-    class Client:
-        def __init__(self, *a, **k):
-            seen["client"] = k
-            self.models = Models()
-
-    monkeypatch.setattr(genai, "Client", Client)
-    llm = GeminiLLM("k", "some-model", timeout=5)
-    msgs = [{"role": "user", "text": "a"}, {"role": "assistant", "text": "b"}]
-    assert llm.complete("sys", msgs) == "ok"
-    assert seen["model"] == "some-model"
-    assert [c.role for c in seen["contents"]] == ["user", "model"]
-    assert seen["config"].system_instruction == "sys"
-    assert seen["client"]["http_options"].timeout == 5000
-
-
-def test_empty_response_is_an_error(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-
-    class Models:
-        def generate_content(self, **kw):
-            return type("R", (), {"text": "  "})()
-
-    class Client:
-        def __init__(self, *a, **k):
-            self.models = Models()
-
-    monkeypatch.setattr(genai, "Client", Client)
-    with pytest.raises(LLMError, match="empty"):
-        GeminiLLM("k", "m").complete("s", [{"role": "user", "text": "x"}])
-
-
-def test_empty_response_reports_gemini_reason(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-
-    class Models:
-        def generate_content(self, **kw):
-            return type(
-                "R",
-                (),
-                {
-                    "text": None,
-                    "prompt_feedback": type("F", (), {"block_reason": "SAFETY"})(),
-                    "candidates": [type("C", (), {"finish_reason": "MAX_TOKENS"})()],
-                },
-            )()
-
-    class Client:
-        def __init__(self, *a, **k):
-            self.models = Models()
-
-    monkeypatch.setattr(genai, "Client", Client)
-    with pytest.raises(LLMError, match="prompt block reason: SAFETY") as exc:
-        GeminiLLM("k", "m").complete("s", [{"role": "user", "text": "x"}])
-    assert "candidate finish reason: MAX_TOKENS" in str(exc.value)

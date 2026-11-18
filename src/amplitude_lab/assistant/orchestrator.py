@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from ..physics.problem import ProblemSpec
-from .client import AssistantClient
 from .errors import AssistantConfigError, AssistantRequestError, AssistantUnavailableError
 from .safe_expr import CandidateParseError
 from .tasks import ProposalTask
 
 MAX_RAW_CHARS = 2000
+
+
+class AssistantClient(Protocol):
+    name: str
+
+    def generate(self, prompt: str, system_instruction: str | None = None) -> str: ...
 
 
 @dataclass

@@ -29,7 +29,6 @@ LIMITATIONS = [
     "Finite numerical agreement is not a proof of global analytic correctness.",
     "The beta function is a textbook reference, not derived independently by this code.",
     "Assistant proposals are never ground truth; 'verified' means a finite-sample test passed.",
-    "Gemini model IDs and live API behaviour were not verified by the authors of this release.",
 ]
 
 UNVERIFIED = [

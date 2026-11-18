@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from .assistant.client import AssistantClient
-from .assistant.orchestrator import run_task
+from .assistant.orchestrator import AssistantClient, run_task
 from .assistant.tasks import BubbleClosedFormTask
 from .physics.amplitude import assemble
 from .physics.kinematics import BENCHMARK_POINTS

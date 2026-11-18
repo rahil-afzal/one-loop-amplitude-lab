@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install (no Gemini extra: the physics core must not need it)
+      - name: Install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
@@ -36,16 +36,3 @@ jobs:
         with:
           name: validation-reports
           path: reports/
-
-  gemini-extra-import:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install with the Gemini extra and run offline tests
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,gemini]"
-          python -m pytest -q

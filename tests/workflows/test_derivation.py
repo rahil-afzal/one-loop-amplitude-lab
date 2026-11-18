@@ -127,7 +127,7 @@ def test_derive_uses_fixed_models_and_tunable_timeout(monkeypatch, tmp_path, cap
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "90")
 
     class FakeLLM:
-        name = "gemini:test"
+        name = "openai-compatible:test"
 
         @classmethod
         def from_env(cls, **kwargs):

@@ -652,13 +652,67 @@ function setStatus(state){
   statusEl.textContent=stateLabels[runStatus]||runStatus.replaceAll("_"," ");
 }
 function ensureStep(id){
-  if(!steps.has(id)) steps.set(id,{id,state:"pending",goal:id,depends_on:[],attempts:[]});
+  if(!steps.has(id)) steps.set(id,{id,state:"pending",goal:id,depends_on:[],attempts:[],substeps:new Map()});
   return steps.get(id);
 }
-function currentAttempt(step){
+function ensureNode(stepId,substepId){
+  if(!substepId) return ensureStep(stepId);
+  const parent=ensureStep(stepId);
+  if(!parent.substeps.has(substepId)) parent.substeps.set(substepId,
+    {id:substepId,parentId:stepId,state:"pending",goal:substepId,attempts:[]});
+  return parent.substeps.get(substepId);
+}
+function currentAttempt(step,substepId){
+  if(substepId) step=ensureNode(step.parentId||step.id,substepId);
   if(!step.attempts.length) step.attempts.push({number:step.attempts.length+1,proposal:"",
     auditText:"",verdict:"",diagnostic:"",state:"generating"});
   return step.attempts[step.attempts.length-1];
+}
+function replacePlan(nextPlan,invalidatedSteps=[]){
+  const rows=Array.isArray(nextPlan)?nextPlan:[];
+  const oldPlan=new Map(plan.map(row=>[row.id,row]));
+  const nextSteps=new Map();
+  for(const row of rows){
+    const step=steps.get(row.id)||{id:row.id,state:"pending",goal:row.goal||row.id,
+      depends_on:[],attempts:[],substeps:new Map()};
+    step.goal=row.goal||step.goal||row.id;
+    step.depends_on=row.depends_on||[];
+    const childRows=Array.isArray(row.substeps)?row.substeps:[];
+    const oldChildren=step.substeps||new Map();
+    const children=new Map();
+    for(const childInfo of childRows){
+      let child=oldChildren.get(childInfo.id);
+      if(!child&&childInfo.id==="main"&&oldPlan.has(row.id)&&
+        !Array.isArray(oldPlan.get(row.id).substeps)&&step.attempts.length){
+        child={id:"main",parentId:row.id,state:step.state,goal:step.goal,
+          attempts:step.attempts};
+        step.attempts=[];
+      }
+      if(!child) child={id:childInfo.id,parentId:row.id,state:"pending",
+        goal:childInfo.goal||childInfo.id,attempts:[]};
+      child.goal=childInfo.goal||child.goal||childInfo.id;
+      child.depends_on=childInfo.depends_on||[];
+      children.set(childInfo.id,child);
+    }
+    step.substeps=children;
+    nextSteps.set(row.id,step);
+  }
+  plan=rows;
+  steps=nextSteps;
+  for(const id of Array.from(accepted.keys())) if(!steps.has(id)) accepted.delete(id);
+  for(const key of invalidatedSteps){
+    const parts=key.split(".");
+    if(parts.length>1&&steps.has(parts[0])){
+      const child=steps.get(parts[0]).substeps.get(parts.slice(1).join("."));
+      if(child) child.state="invalidated";
+      accepted.delete(parts[0]);
+    }else if(steps.has(key)){
+      steps.get(key).state="invalidated";
+      accepted.delete(key);
+    }
+  }
+  renderAccepted();
+  renderPlan();
 }
 function renderPlan(){
   stepList.replaceChildren();
@@ -716,6 +770,39 @@ function renderPlan(){
         details.append(row);
       }
       card.append(details);
+    }
+    if(Array.isArray(item.substeps)&&item.substeps.length){
+      for(const childInfo of item.substeps){
+        const child=ensureNode(item.id,childInfo.id);
+        child.goal=childInfo.goal||child.goal;
+        attemptCount+=child.attempts.length;
+        const childCard=text("section","");childCard.className="step-card";
+        childCard.dataset.state=child.state;
+        childCard.append(text("h3",childInfo.id+": "+child.goal+" · "+
+          child.attempts.length+" attempt(s)"));
+        childCard.append(text("div",stateLabels[child.state]||child.state.replaceAll("_"," "),"hint"));
+        if(childInfo.depends_on&&childInfo.depends_on.length)
+          childCard.append(text("div","Depends on: "+childInfo.depends_on.join(", "),"hint"));
+        const latestChild=child.attempts[child.attempts.length-1];
+        if(latestChild&&latestChild.proposal) childCard.append(text("pre",latestChild.proposal));
+        if(latestChild&&latestChild.diagnostic)
+          childCard.append(text("p",latestChild.diagnostic,"diagnostic"));
+        if(child.attempts.length){
+          const history=document.createElement("details");
+          history.append(text("summary","Child attempt and audit history"));
+          for(const attempt of child.attempts){
+            const attemptRow=text("div","");attemptRow.className="attempt";
+            attemptRow.append(text("strong","Attempt "+attempt.number+": "+
+              (stateLabels[attempt.state]||attempt.state)));
+            if(attempt.proposal) attemptRow.append(text("pre",attempt.proposal));
+            if(attempt.auditText) attemptRow.append(text("pre",attempt.auditText));
+            if(attempt.diagnostic) attemptRow.append(text("p",attempt.diagnostic,"diagnostic"));
+            history.append(attemptRow);
+          }
+          childCard.append(history);
+        }
+        card.append(childCard);
+      }
     }
     stepList.append(card);
   }
@@ -775,6 +862,7 @@ function describe(item){
   switch(item.type){
     case "plan.started": return "Planner is interpreting the problem.";
     case "plan.ready": return "Plan ready: "+item.steps.length+" dependency-ordered steps.";
+    case "plan.updated": return "Plan updated: "+(item.reason||"checkpoint change")+".";
     case "step.generating": return "Derivation agent started "+name+" (attempt "+item.attempt+").";
     case "step.awaiting_audit": return "Step "+name+" is awaiting the independent AI audit.";
     case "step.audit": return "AI audit "+item.verdict.toLowerCase()+" for "+name+
@@ -807,7 +895,7 @@ function handleEvent(item){
           "Planner response is arriving. The structured interpretation and plan will appear when complete.";
       }
     }else if(item.step_id){
-      const step=ensureStep(item.step_id), attempt=currentAttempt(step);
+      const step=ensureNode(item.step_id,item.substep_id), attempt=currentAttempt(step,item.substep_id);
       if(item.agent==="audit") attempt.auditText+=item.text||"";
       else attempt.proposal+=item.text||"";
       renderPlan();
@@ -815,8 +903,7 @@ function handleEvent(item){
   }else{
     if(item.type==="plan.ready"){
       stopPlanningTimer();
-      plan=item.steps||[];
-      steps=new Map(plan.map(row=>[row.id,{...row,state:"pending",attempts:[]}]));
+      replacePlan(item.steps||[]);
       document.querySelector("#interpretation").textContent=item.interpretation||"Not supplied.";
       document.querySelector("#lagrangian").textContent=item.lagrangian||"Not supplied.";
       document.querySelector("#strategy").textContent=item.strategy||"Not supplied.";
@@ -827,38 +914,51 @@ function handleEvent(item){
       document.querySelector("#overview").hidden=false;
       document.querySelector("#planning-preview").hidden=true;
       document.querySelector("#planning-state").textContent="Plan ready";
+    }else if(item.type==="plan.updated"){
+      replacePlan(item.steps||[],item.invalidated_steps||[]);
     }else if(item.type==="plan.started"){
       startPlanningTimer();
     }else if(item.step_id&&item.type==="step.generating"){
-      const step=ensureStep(item.step_id); step.state="generating";
+      const step=ensureNode(item.step_id,item.substep_id); step.state="generating";
       step.goal=item.goal||step.goal;
       step.attempts.push({number:item.attempt,proposal:"",auditText:"",verdict:"",
         diagnostic:"",state:"generating"});
+      if(item.substep_id) ensureStep(item.step_id).state="generating";
     }else if(item.step_id&&item.type==="step.awaiting_audit"){
-      const step=ensureStep(item.step_id);step.state="awaiting_audit";
-      currentAttempt(step).state="awaiting_audit";
+      const step=ensureNode(item.step_id,item.substep_id);step.state="awaiting_audit";
+      currentAttempt(step,item.substep_id).state="awaiting_audit";
     }else if(item.type==="step.audit"){
-      const step=ensureStep(item.step_id), attempt=currentAttempt(step);
+      const step=ensureNode(item.step_id,item.substep_id), attempt=currentAttempt(step,item.substep_id);
       attempt.verdict=item.verdict;attempt.diagnostic=item.diagnostic;attempt.audit=item.response;
       attempt.state=item.verdict==="ACCEPT"?"accepted":"rejected";
-      step.state=item.verdict==="ACCEPT"?"accepted":"rejected";
+      if(!item.substep_id) step.state=item.verdict==="ACCEPT"?"accepted":"rejected";
+    }else if(item.type==="substep.accepted"){
+      const child=ensureNode(item.step_id,item.substep_id);
+      child.state="accepted";currentAttempt(child,item.substep_id).state="accepted";
     }else if(item.type==="step.accepted"){
       const step=ensureStep(item.step_id);step.state="accepted";
-      const attempt=currentAttempt(step);attempt.state="accepted";
+      if(!step.substeps.size) currentAttempt(step).state="accepted";
       accepted.set(item.step_id,{id:item.step_id,goal:step.goal,content:item.content,audit:item.audit});
       renderAccepted();
     }else if(item.type==="step.rejected"){
-      const step=ensureStep(item.step_id);step.state="rejected";
-      const attempt=currentAttempt(step);attempt.state="rejected";
+      const step=ensureNode(item.step_id,item.substep_id);step.state="rejected";
+      const attempt=currentAttempt(step,item.substep_id);attempt.state="rejected";
       attempt.diagnostic=item.diagnostic||attempt.diagnostic;
-      accepted.delete(item.step_id);renderAccepted();
+      if(!item.substep_id) accepted.delete(item.step_id);renderAccepted();
     }else if(item.type==="step.revising"){
-      ensureStep(item.step_id).state="revising";
+      ensureNode(item.step_id,item.substep_id).state="revising";
     }else if(item.type==="backtracking.started"){
       for(const id of (item.invalidated_steps||[])){
-        const step=ensureStep(id);step.state="invalidated";accepted.delete(id);
+        const parts=id.split(".");
+        const isChild=parts.length>1&&steps.has(parts[0]);
+        const step=isChild?ensureNode(parts[0],parts.slice(1).join(".")):ensureStep(id);
+        step.state="invalidated";accepted.delete(isChild?parts[0]:id);
       }
-      ensureStep(item.target_step_id).state="revising";renderAccepted();
+      const targetParts=(item.target_step_id||"").split(".");
+      const targetIsChild=targetParts.length>1&&steps.has(targetParts[0]);
+      ensureNode(targetIsChild?targetParts[0]:item.target_step_id,
+        targetIsChild?targetParts.slice(1).join("."):null).state="revising";
+      renderAccepted();
     }else if(item.type==="verification.finished"){
       renderVerification({available:true,passed:item.passed,checks:item.checks});
     }else if(item.type==="derivation.completed"||item.type==="run.done"){

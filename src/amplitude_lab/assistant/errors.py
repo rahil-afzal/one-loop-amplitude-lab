@@ -3,7 +3,7 @@ class AssistantConfigError(RuntimeError):
 
 
 class AssistantUnavailableError(RuntimeError):
-    """An optional dependency (google-genai) is not installed."""
+    """An optional assistant dependency or service is unavailable."""
 
 
 class AssistantRequestError(RuntimeError):

@@ -17,4 +17,4 @@ verifier that does not reuse the proposal's derivation; optional comparison agai
 Package-X / LoopTools output as an external oracle.
 
 Open verification items: re-check equation numbers and the `c_1^[42]` normalization
-against the paper PDF; verify Gemini model IDs against the live documentation.
+against the paper PDF.

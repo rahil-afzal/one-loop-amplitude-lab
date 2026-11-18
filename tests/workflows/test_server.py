@@ -71,3 +71,13 @@ def test_sse_endpoint_rejects_task_paths():
         httpd.shutdown()
         thread.join(timeout=3)
         httpd.server_close()
+
+
+def test_embedded_ui_tracks_nested_attempts_by_parent_and_child():
+    assert "function ensureNode(stepId,substepId)" in server._PAGE
+    assert "function replacePlan(nextPlan,invalidatedSteps=[])" in server._PAGE
+    assert 'item.type==="plan.updated"' in server._PAGE
+    assert "replacePlan(item.steps||[],item.invalidated_steps||[])" in server._PAGE
+    assert "ensureNode(item.step_id,item.substep_id)" in server._PAGE
+    assert "item.substeps" in server._PAGE
+    assert 'item.type==="substep.accepted"' in server._PAGE

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import threading
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -21,6 +24,8 @@ PLAN_SYSTEM = (
     "conventions; do not require the user to provide the full Lagrangian. If the theory does "
     "not determine it uniquely, make the ambiguity explicit in assumptions. The first plan "
     "step must establish and justify this Lagrangian so it can be independently audited. "
+    "Break parent steps into small auditable substeps and include a non-empty `substeps` array "
+    "on each parent; child dependencies are local to that parent. "
     "Select a suitable approach rather than forcing a fixed checklist: include "
     "kinematics, Feynman rules, diagrams, symmetry factors, loop integration, regularization, "
     "renormalization, crossing, or other work only when applicable to this problem. Make the "
@@ -33,7 +38,9 @@ PLAN_SYSTEM = (
     '{"interpretation":"problem and requested quantity","lagrangian":"explicit proposed '
     'Lagrangian and conventions","strategy":"chosen approach",'
     '"assumptions":["explicit assumption"],"steps":[{"id":"short_id",'
-    '"goal":"one mathematical deliverable","depends_on":["earlier_id"]}]} . '
+    '"goal":"one mathematical deliverable","depends_on":["earlier_id"],'
+    '"substeps":[{"id":"child_id","goal":"one bounded deliverable",'
+    '"depends_on":["earlier_child_id"]}]}]} . '
     "Use 5-12 steps and an empty assumptions list when none are needed. Make the first step "
     "establish the Lagrangian and a short notation contract: define the denominator-only "
     "integral, specify where mu^{2 eps} and coupling factors live, and state sign/i conventions "
@@ -86,7 +93,11 @@ AUDIT_SYSTEM = (
     "PREVIOUS: <id>: RESOLVED|OPEN: <evidence>   (one per line, or 'none')\n"
     "BLOCKING: <id> | <equation/location> | <what is inconsistent> | <what to re-derive>   (one per line, or 'none')\n"
     "MINOR: <id> | <note>   (one per line, or 'none')\n"
-    "INVALIDATE: <accepted step id or 'none'>\n"
+    "INVALIDATE: <current|accepted step id|parent step id|none>\n"
+    "When auditing a nested substep, use 'current' for a local rejection. Naming "
+    "its parent step id on a rejection invalidates that parent's full substep subtree "
+    "and dependent checkpoints; name a specific child checkpoint to invalidate only "
+    "that child and its dependents.\n"
     "Write math in plain text without backslashes."
 )
 
@@ -111,6 +122,15 @@ class DerivationStep:
     id: str
     goal: str
     depends_on: tuple[str, ...]
+    substeps: tuple["DerivationSubstep", ...] = ()
+    explicit_substeps: bool = False
+
+
+@dataclass(frozen=True)
+class DerivationSubstep:
+    id: str
+    goal: str
+    depends_on: tuple[str, ...]
 
 
 @dataclass
@@ -123,6 +143,7 @@ class StepAttempt:
     status: str
     audit_response: str = ""
     deterministic_checks: dict | None = None
+    substep_id: str | None = None
 
 
 @dataclass
@@ -154,9 +175,19 @@ class AutonomousResult:
     issue_ledger: dict = field(default_factory=dict)
     open_issues: dict = field(default_factory=dict)
     minor_notes: list[str] = field(default_factory=list)
+    error_code: str | None = None
+    child_statuses: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        for attempt in value["attempts"]:
+            if attempt.get("substep_id") is None:
+                attempt.pop("substep_id", None)
+        if self.error_code is None:
+            value.pop("error_code", None)
+        if not self.child_statuses:
+            value.pop("child_statuses", None)
+        return value
 
 
 def _json_object(text: str) -> dict:
@@ -178,6 +209,7 @@ def parse_plan(text: str) -> list[DerivationStep]:
         raise PlanError("plan must contain between 1 and 30 steps")
     steps = []
     seen = set()
+    total_children = 0
     for row in raw_steps:
         if not isinstance(row, dict):
             raise PlanError("each plan entry must be an object")
@@ -193,7 +225,56 @@ def parse_plan(text: str) -> list[DerivationStep]:
             or any(item not in seen for item in dependencies)
         ):
             raise PlanError(f"step {step_id!r} dependencies must refer to unique earlier steps")
-        steps.append(DerivationStep(step_id, goal.strip(), tuple(dependencies)))
+        explicit_substeps = "substeps" in row
+        if explicit_substeps:
+            if set(row) != {"id", "goal", "depends_on", "substeps"}:
+                raise PlanError(f"step {step_id!r} has unknown fields")
+            raw_children = row["substeps"]
+            if not isinstance(raw_children, list) or not 1 <= len(raw_children) <= 20:
+                raise PlanError(f"step {step_id!r} must contain between 1 and 20 substeps")
+            substeps = []
+            child_ids = set()
+            for child in raw_children:
+                if not isinstance(child, dict) or set(child) - {"id", "goal", "depends_on"}:
+                    raise PlanError(f"substeps in {step_id!r} must use the exact child schema")
+                child_id, child_goal = child.get("id"), child.get("goal")
+                child_deps = child.get("depends_on", [])
+                if (
+                    not isinstance(child_id, str)
+                    or not _STEP_ID.fullmatch(child_id)
+                    or child_id in child_ids
+                ):
+                    raise PlanError(f"invalid or duplicate substep ID {child_id!r} in {step_id!r}")
+                if not isinstance(child_goal, str) or not child_goal.strip() or len(child_goal) > 500:
+                    raise PlanError(
+                        f"substep {child_id!r} must have a non-empty goal of at most 500 chars"
+                    )
+                if (
+                    not isinstance(child_deps, list)
+                    or any(not isinstance(item, str) for item in child_deps)
+                    or len(child_deps) != len(set(child_deps))
+                    or any(item not in child_ids for item in child_deps)
+                ):
+                    raise PlanError(
+                        f"substep {child_id!r} dependencies must refer to unique earlier substeps"
+                    )
+                substeps.append(DerivationSubstep(child_id, child_goal.strip(), tuple(child_deps)))
+                child_ids.add(child_id)
+        else:
+            # Legacy parent-only entries historically tolerated unrelated extra keys.
+            substeps = [DerivationSubstep("main", goal.strip(), ())]
+        total_children += len(substeps)
+        if total_children > 120:
+            raise PlanError("plan must contain at most 120 substeps")
+        steps.append(
+            DerivationStep(
+                step_id,
+                goal.strip(),
+                tuple(dependencies),
+                tuple(substeps),
+                explicit_substeps,
+            )
+        )
         seen.add(step_id)
     return steps
 
@@ -357,7 +438,14 @@ def _complete(llm, system, messages, on_token: Callable[[str], None]) -> str:
     return response
 
 
-def _token_handler(log, state: str, agent: str, step_id: str | None = None, parts=None):
+def _token_handler(
+    log,
+    state: str,
+    agent: str,
+    step_id: str | None = None,
+    parts=None,
+    substep_id: str | None = None,
+):
     collected = parts if parts is not None else []
 
     def receive(token: str) -> None:
@@ -367,6 +455,7 @@ def _token_handler(log, state: str, agent: str, step_id: str | None = None, part
             state,
             agent=agent,
             step_id=step_id,
+            **({"substep_id": substep_id} if substep_id else {}),
             text=token,
         )
 
@@ -452,14 +541,32 @@ def _render_report(result: AutonomousResult) -> str:
     for step in result.plan:
         dependencies = ", ".join(step["depends_on"]) or "none"
         sections.append(f"- `{step['id']}`: {step['goal']} (depends on: {dependencies})")
+        for child in step.get("substeps", []):
+            child_dependencies = ", ".join(child["depends_on"]) or "none"
+            sections.append(
+                f"  - `{step['id']}.{child['id']}`: {child['goal']} "
+                f"(depends on: {child_dependencies})"
+            )
     sections.extend(["", "## Accepted derivation", ""])
     for row in result.accepted_steps:
         sections.extend([f"### {row['step_id']}: {row['goal']}", "", row["content"], ""])
+        for child in row.get("substeps", []):
+            sections.extend(
+                [
+                    f"#### {row['step_id']}.{child['substep_id']}: {child['goal']}",
+                    "",
+                    child["content"],
+                    "",
+                ]
+            )
     sections.extend(["## Attempts and audit history", ""])
     for attempt in result.attempts:
+        title_id = attempt.step_id
+        if attempt.substep_id:
+            title_id += f".{attempt.substep_id}"
         sections.extend(
             [
-                f"### {attempt.step_id}, attempt {attempt.attempt}: {attempt.status}",
+                f"### {title_id}, attempt {attempt.attempt}: {attempt.status}",
                 "",
                 f"Audit verdict: {attempt.verdict}",
                 "",
@@ -484,6 +591,13 @@ def _render_report(result: AutonomousResult) -> str:
             )
     else:
         sections.append("No backtracking was required.")
+    if result.child_statuses:
+        sections.extend(["", "## Substep progress", ""])
+        for node_id, child in result.child_statuses.items():
+            sections.append(
+                f"- `{node_id}`: **{child['status']}** "
+                f"({child['attempts']} attempt(s))"
+            )
     sections.extend(["", "## Deterministic verification", ""])
     sections.append(json.dumps(result.verification, indent=2, ensure_ascii=False))
     sections.extend(["", "## Final amplitude", ""])
@@ -535,10 +649,45 @@ def _render_steps_report(result: AutonomousResult) -> str:
         if row:
             sections.extend(["### Accepted result", "", row["content"], ""])
             sections.extend(["### AI audit", "", _format_audit_response(row["audit"]), ""])
-        for attempt in attempts_by_step.get(step_id, []):
+        for child in step.get("substeps", []):
+            qualified = f"{step_id}.{child['id']}"
+            child_state = result.child_statuses.get(qualified, {})
             sections.extend(
                 [
-                    f"### Attempt {attempt.attempt}: {attempt.status}",
+                    f"### Substep {child['id']}: {child['goal']}",
+                    "",
+                    f"- Status: **{child_state.get('status', 'pending')}**",
+                    "",
+                ]
+            )
+            accepted_child = next(
+                (
+                    value
+                    for value in (row or {}).get("substeps", [])
+                    if value["substep_id"] == child["id"]
+                ),
+                None,
+            )
+            if accepted_child:
+                sections.extend(
+                    [
+                        accepted_child["content"],
+                        "",
+                        "#### Child audit",
+                        "",
+                        _format_audit_response(accepted_child["audit"]),
+                        "",
+                    ]
+                )
+        for attempt in attempts_by_step.get(step_id, []):
+            attempt_heading = (
+                f"### Child {attempt.substep_id} attempt {attempt.attempt}: {attempt.status}"
+                if attempt.substep_id
+                else f"### Attempt {attempt.attempt}: {attempt.status}"
+            )
+            sections.extend(
+                [
+                    attempt_heading,
                     "",
                     f"AI audit verdict: **{attempt.verdict}**",
                     "",
@@ -598,10 +747,12 @@ def _render_response(result: AutonomousResult) -> str:
         "",
     ]
     if result.accepted_steps:
-        sections.extend(
-            f"### {row['goal']}\n\n{row['content']}\n"
-            for row in result.accepted_steps
-        )
+        for row in result.accepted_steps:
+            sections.append(f"### {row['goal']}\n\n{row['content']}\n")
+            for child in row.get("substeps", []):
+                sections.append(
+                    f"#### {child['substep_id']}: {child['goal']}\n\n{child['content']}\n"
+                )
     else:
         sections.append("No derivation steps were accepted.")
     sections.extend(["## Result", "", result.final_amplitude or "No final result was accepted."])
@@ -622,6 +773,295 @@ def _write_markdown_reports(result: AutonomousResult) -> None:
     (run_dir / "response.md").write_text(_render_response(result), encoding="utf-8")
 
 
+class _SnapshotError(OSError):
+    def __init__(self, message: str, code: str, replaced: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.replaced = replaced
+
+
+def _step_dict(step: DerivationStep) -> dict:
+    row = {
+        "id": step.id,
+        "goal": step.goal,
+        "depends_on": step.depends_on,
+    }
+    if step.explicit_substeps:
+        row["substeps"] = [
+            {"id": child.id, "goal": child.goal, "depends_on": child.depends_on}
+            for child in step.substeps
+        ]
+    return row
+
+
+def _step_nodes(steps: list[DerivationStep]) -> list[dict]:
+    result = []
+    for step in steps:
+        for child in step.substeps:
+            result.append(
+                {
+                    "key": f"{step.id}.{child.id}",
+                    "step_id": step.id,
+                    "substep_id": child.id if step.explicit_substeps else None,
+                    "goal": child.goal,
+                    "local_dependencies": [
+                        f"{step.id}.{dependency}" for dependency in child.depends_on
+                    ],
+                    "parent_dependencies": list(step.depends_on),
+                }
+            )
+    return result
+
+def _node_dependencies(node: dict, nodes_by_key: dict[str, dict], steps: list[DerivationStep]) -> list[str]:
+    dependencies = list(node["local_dependencies"])
+    for parent_id in node["parent_dependencies"]:
+        dependencies.extend(
+            item["key"] for item in nodes_by_key.values() if item["step_id"] == parent_id
+        )
+    return list(dict.fromkeys(dependencies))
+
+
+def _node_signatures(steps: list[DerivationStep]) -> dict[str, tuple]:
+    signatures = {}
+    for node in _step_nodes(steps):
+        step = next(item for item in steps if item.id == node["step_id"])
+        signatures[node["key"]] = (
+            node["key"],
+            node["goal"],
+            tuple(node["local_dependencies"]),
+            step.goal,
+            tuple(step.depends_on),
+        )
+    return signatures
+
+
+def _atomic_checkpoint(path: Path, payload: dict) -> None:
+    temporary = None
+    replaced = False
+    try:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".checkpoints-", suffix=".tmp", dir=str(path.parent)
+        )
+        temporary = Path(name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        replaced = True
+        if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except OSError as exc:
+        raise _SnapshotError(
+            f"checkpoint snapshot persistence failed: {exc}",
+            "snapshot_durability_uncertain" if replaced else "snapshot_write_failed",
+            replaced=replaced,
+        ) from exc
+    finally:
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _audit_payload(text: str, current_key: str) -> ParsedAudit:
+    try:
+        payload = _json_object(text)
+    except (json.JSONDecodeError, ValueError):
+        return parse_audit(text)
+    verdict = payload.get("verdict")
+    verdict = verdict.upper() if isinstance(verdict, str) else "MISSING"
+    diagnostic = payload.get("diagnostic")
+    raw_target = payload.get("target_step_id")
+    parsed = ParsedAudit(
+        verdict=verdict if verdict in ("ACCEPT", "REJECT") else "MISSING",
+        blocking=[diagnostic.strip()]
+        if verdict == "REJECT" and isinstance(diagnostic, str) and diagnostic.strip()
+        else [],
+        invalidate=(
+            "none"
+            if raw_target is None
+            or (
+                isinstance(raw_target, str)
+                and raw_target.casefold() in ("none", "current", current_key.casefold())
+            )
+            else str(raw_target)
+        ),
+    )
+    if "insert_substep" in payload or "INSERT_SUBSTEP" in payload:
+        parsed.format_errors.append("legacy JSON audits do not support INSERT_SUBSTEP")
+    if not isinstance(payload.get("diagnostic"), str) or not payload["diagnostic"].strip():
+        parsed.format_errors.append("legacy JSON audit omitted its diagnostic")
+    return parsed
+
+
+def _snapshot_state(state: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "status": state["status"],
+        "error": state.get("error", ""),
+        "error_code": state.get("error_code"),
+        "verification": state.get("verification", {}),
+        "final_amplitude": state.get("final_amplitude", ""),
+        "backtracking": [asdict(item) for item in state.get("backtracking", [])],
+        "notation_contract": state.get("notation_contract", ""),
+        "plan": [_step_dict(step) for step in state["steps"]],
+        "queue": list(state["queue"]),
+        "accepted": deepcopy(state["accepted"]),
+        "attempts": [_attempt_dict(attempt) for attempt in state["attempts"]],
+        "retry_counts": dict(state["retry_counts"]),
+        "node_statuses": dict(state["node_statuses"]),
+        "retired_ids": sorted(state["retired_ids"]),
+        "insertion_count": state["insertion_count"],
+        "replans_used": state["replans_used"],
+        "issue_ledgers": {
+            key: ledger.to_dict() for key, ledger in state.get("ledgers", {}).items()
+        },
+        "feedback": dict(state.get("feedback", {})),
+        "interpretation": state.get("interpretation", ""),
+        "lagrangian": state.get("lagrangian", ""),
+        "strategy": state.get("strategy", ""),
+        "assumptions": list(state.get("assumptions", [])),
+        "planner_responses": list(state.get("planner_responses", [])),
+    }
+
+
+def _attempt_dict(attempt: StepAttempt) -> dict:
+    row = asdict(attempt)
+    if attempt.substep_id is None:
+        row.pop("substep_id", None)
+    return row
+
+
+def _aggregate_accepted(steps: list[DerivationStep], accepted: dict) -> list[dict]:
+    result = []
+    for step in steps:
+        child_keys = [f"{step.id}.{child.id}" for child in step.substeps]
+        if not child_keys or any(key not in accepted for key in child_keys):
+            continue
+        rows = [accepted[key] for key in child_keys]
+        row = {
+            "step_id": step.id,
+            "goal": step.goal,
+            "content": "\n\n".join(item["content"] for item in rows),
+            "audit": "\n\n".join(item["audit"] for item in rows),
+            "attempt": rows[-1]["attempt"],
+        }
+        if step.explicit_substeps:
+            row["substeps"] = [
+                {
+                    "substep_id": child.id,
+                    "goal": child.goal,
+                    "content": accepted[f"{step.id}.{child.id}"]["content"],
+                    "audit": accepted[f"{step.id}.{child.id}"]["audit"],
+                    "attempt": accepted[f"{step.id}.{child.id}"]["attempt"],
+                }
+                for child in step.substeps
+            ]
+        result.append(row)
+    return result
+
+
+def _display_node_key(key: str, steps: list[DerivationStep]) -> str:
+    node = next((item for item in _step_nodes(steps) if item["key"] == key), None)
+    if node is not None and node["substep_id"] is None:
+        return node["step_id"]
+    return key
+
+
+def _exhaust_node(
+    candidate: dict,
+    key: str,
+    nodes: list[dict],
+    dependencies: dict[str, list[str]],
+    diagnostic: str,
+) -> None:
+    affected = {key}
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if node["key"] not in affected and any(
+                dependency in affected for dependency in dependencies.get(node["key"], [])
+            ):
+                affected.add(node["key"])
+                changed = True
+    candidate["status"] = "retry_exhausted"
+    candidate["node_statuses"][key] = "retry_exhausted"
+    for item in affected - {key}:
+        candidate["node_statuses"][item] = "blocked"
+    candidate["queue"] = [item for item in candidate["queue"] if item not in affected]
+    parent, _, child = key.partition(".")
+    candidate["error"] = (
+        f"Checkpoint {parent!r}/{child!r} exhausted its retry budget; "
+        f"last diagnostic: {diagnostic or 'not accepted'}"
+    )
+
+
+def _validate_insertion(
+    insertion: dict,
+    current: dict,
+    state: dict,
+    max_insertions: int,
+    retry_budget: int,
+) -> str:
+    step = next(item for item in state["steps"] if item.id == current["step_id"])
+    child_name = current["substep_id"] or "main"
+    children = list(step.substeps)
+    by_id = {child.id: child for child in children}
+    requested_id = insertion.get("id")
+    goal = insertion.get("goal")
+    dependencies = insertion.get("depends_on", [])
+    if (
+        not isinstance(requested_id, str)
+        or not _STEP_ID.fullmatch(requested_id)
+        or not isinstance(goal, str)
+        or not goal.strip()
+        or len(goal.strip()) > 500
+        or not isinstance(dependencies, list)
+        or any(not isinstance(item, str) for item in dependencies)
+        or len(dependencies) != len(set(dependencies))
+    ):
+        return "INSERT_SUBSTEP has an invalid id, goal, or dependency list."
+    inserted_key = f"{step.id}.{requested_id}"
+    if inserted_key in state["retired_ids"] or requested_id in by_id:
+        return "INSERT_SUBSTEP id collides with a current or retired child."
+    if state["insertion_count"] >= max_insertions:
+        return "INSERT_SUBSTEP run limit is exhausted."
+    if len(children) >= 20 or len(state["retired_ids"]) >= 120:
+        return "INSERT_SUBSTEP exceeds the child or lifetime node cap."
+    if state["retry_counts"].get(current["key"], 0) >= retry_budget:
+        return "The rejected target has no retry budget available for insertion."
+    target = by_id.get(child_name)
+    if target is None:
+        return "INSERT_SUBSTEP target no longer exists."
+    if (
+        step.id == state["steps"][0].id
+        and child_name == step.substeps[0].id
+        and not re.search(r"lagrangian|action|\bL\s*=", goal, re.IGNORECASE)
+    ):
+        return "The first substep must continue to establish the Lagrangian."
+    local_ancestors = set()
+    pending = list(target.depends_on)
+    while pending:
+        ancestor = pending.pop()
+        if ancestor not in local_ancestors:
+            local_ancestors.add(ancestor)
+            pending.extend(by_id[ancestor].depends_on)
+    if any(
+        dependency not in local_ancestors
+        or f"{step.id}.{dependency}" not in state["accepted"]
+        for dependency in dependencies
+    ):
+        return "INSERT_SUBSTEP dependencies must be accepted local ancestors of the target."
+    return ""
+
+
 def run_autonomous_derivation(
     task,
     derivation_llm,
@@ -631,12 +1071,25 @@ def run_autonomous_derivation(
     on_event=None,
     self_consistency_samples=0,
     max_replans=1,
+    max_substep_retries=None,
+    max_substep_insertions=3,
 ) -> AutonomousResult:
-    """Plan, derive, audit, checkpoint, backtrack, and verify one step at a time."""
-    if max_step_retries < 0:
-        raise ValueError("max_step_retries must be non-negative")
-    if max_replans < 0:
-        raise ValueError("max_replans must be non-negative")
+    """Run a bounded parent/substep DAG, checkpointing each committed transition."""
+    for name, value in (
+        ("max_step_retries", max_step_retries),
+        ("max_replans", max_replans),
+        ("max_substep_insertions", max_substep_insertions),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if max_substep_retries is not None and (
+        not isinstance(max_substep_retries, int)
+        or isinstance(max_substep_retries, bool)
+        or max_substep_retries < 0
+    ):
+        raise ValueError("max_substep_retries must be a non-negative integer")
+    if max_substep_retries is None:
+        max_substep_retries = max_step_retries
     if not task.derivation_prompt.strip():
         raise ValueError(f"task {task.name!r} has no derivation prompt")
     for client in (derivation_llm, audit_llm):
@@ -676,7 +1129,19 @@ def run_autonomous_derivation(
                     if hasattr(audit_llm, "describe")
                     else {"name": result.audit_model}
                 ),
+                "derivation_client": (
+                    derivation_llm.describe()
+                    if hasattr(derivation_llm, "describe")
+                    else {"name": result.derivation_model}
+                ),
+                "audit_client": (
+                    audit_llm.describe()
+                    if hasattr(audit_llm, "describe")
+                    else {"name": result.audit_model}
+                ),
                 "max_step_retries": max_step_retries,
+                "max_substep_retries": max_substep_retries,
+                "max_substep_insertions": max_substep_insertions,
                 "max_replans": max_replans,
                 "streaming": bool(getattr(derivation_llm, "stream", False)),
             },
@@ -684,12 +1149,211 @@ def run_autonomous_derivation(
         ),
         encoding="utf-8",
     )
-    accepted: dict[str, dict] = {}
-    ledgers: dict[str, IssueLedger] = {}
-    retry_counts: dict[str, int] = {}
-    pending: list[str] = []
-    step_by_id: dict[str, DerivationStep] = {}
-    replans_used = 0
+    state = {
+        "status": "running",
+        "steps": [],
+        "queue": [],
+        "accepted": {},
+        "attempts": [],
+        "retry_counts": {},
+        "node_statuses": {},
+        "retired_ids": set(),
+        "insertion_count": 0,
+        "replans_used": 0,
+        "ledgers": {},
+        "feedback": {},
+        "error": "",
+        "error_code": None,
+        "verification": {},
+        "final_amplitude": "",
+        "backtracking": [],
+        "notation_contract": "",
+        "interpretation": "",
+        "lagrangian": "",
+        "strategy": "",
+        "assumptions": [],
+        "planner_responses": [],
+    }
+    initial_snapshot = run_dir / "checkpoints.json"
+
+    def _apply_public_state(candidate: dict) -> None:
+        result.status = candidate["status"]
+        result.error = candidate.get("error", "")
+        result.error_code = candidate.get("error_code")
+        result.verification = candidate.get("verification", {})
+        result.final_amplitude = candidate.get("final_amplitude", "")
+        result.backtracking = candidate.get("backtracking", [])
+        result.notation_contract = candidate.get("notation_contract", "")
+        result.interpretation = candidate.get("interpretation", "")
+        result.lagrangian = candidate.get("lagrangian", "")
+        result.strategy = candidate.get("strategy", "")
+        result.assumptions = candidate.get("assumptions", [])
+        result.plan = [_step_dict(step) for step in candidate["steps"]]
+        result.attempts = candidate["attempts"]
+        result.accepted_steps = _aggregate_accepted(candidate["steps"], candidate["accepted"])
+        if any(step.explicit_substeps for step in candidate["steps"]):
+            result.child_statuses = {
+                node["key"]: {
+                    "parent_step_id": node["step_id"],
+                    "substep_id": node["substep_id"] or "main",
+                    "status": candidate["node_statuses"].get(node["key"], "pending"),
+                    "attempts": sum(
+                        item.step_id == node["step_id"]
+                        and item.substep_id == node["substep_id"]
+                        for item in candidate["attempts"]
+                    ),
+                }
+                for node in _step_nodes(candidate["steps"])
+            }
+        by_key = {node["key"]: node for node in _step_nodes(candidate["steps"])}
+        result.issue_ledger = {
+            (
+                by_key[key]["step_id"]
+                if key in by_key and by_key[key]["substep_id"] is None
+                else key
+            ): ledger.to_dict()
+            for key, ledger in candidate["ledgers"].items()
+        }
+        result.open_issues = {
+            (
+                by_key[key]["step_id"]
+                if key in by_key and by_key[key]["substep_id"] is None
+                else key
+            ): {issue.harness_id: issue.text for issue in ledger.open_issues()}
+            for key, ledger in candidate["ledgers"].items()
+            if ledger.open_issues()
+        }
+        result.minor_notes = [
+            note for ledger in candidate["ledgers"].values() for note in ledger.minor
+        ]
+
+    def publish(candidate: dict) -> None:
+        nonlocal state
+        try:
+            _atomic_checkpoint(initial_snapshot, _snapshot_state(candidate))
+        except _SnapshotError as exc:
+            if exc.replaced:
+                state = candidate
+                _apply_public_state(candidate)
+            raise
+        state = candidate
+        _apply_public_state(candidate)
+
+    def graph(candidate: dict):
+        nodes = _step_nodes(candidate["steps"])
+        by_key = {node["key"]: node for node in nodes}
+        dependencies = {
+            key: _node_dependencies(node, by_key, candidate["steps"])
+            for key, node in by_key.items()
+        }
+        return nodes, by_key, dependencies
+
+    def ready_keys(candidate: dict, candidates=None) -> list[str]:
+        nodes, _by_key, dependencies = graph(candidate)
+        selected = set(candidates) if candidates is not None else set(candidate["node_statuses"])
+        return [
+            node["key"]
+            for node in nodes
+            if node["key"] in selected
+            and candidate["node_statuses"].get(node["key"]) not in ("accepted", "blocked")
+            and node["key"] not in candidate["queue"]
+            and all(dependency in candidate["accepted"] for dependency in dependencies[node["key"]])
+        ]
+
+    def enqueue(candidate: dict, keys=None, front=False) -> None:
+        newly_ready = ready_keys(candidate, keys)
+        if front:
+            candidate["queue"] = newly_ready + [
+                key for key in candidate["queue"] if key not in newly_ready
+            ]
+        else:
+            candidate["queue"].extend(
+                key for key in newly_ready if key not in candidate["queue"]
+            )
+
+    def retry_limit(node: dict) -> int:
+        return max_substep_retries if node["substep_id"] is not None else max_step_retries
+
+    def ancestors(node_key: str, dependency_map: dict[str, list[str]]) -> set[str]:
+        found = set()
+        pending = list(dependency_map.get(node_key, []))
+        while pending:
+            item = pending.pop()
+            if item not in found:
+                found.add(item)
+                pending.extend(dependency_map.get(item, []))
+        return found
+
+    def parent_ancestors(parent_id: str, steps: list[DerivationStep]) -> set[str]:
+        by_parent = {step.id: step for step in steps}
+        found = set()
+        pending = list(by_parent[parent_id].depends_on)
+        while pending:
+            parent = pending.pop()
+            if parent not in found:
+                found.add(parent)
+                pending.extend(by_parent[parent].depends_on)
+        return found
+
+    def authorized_target(
+        parsed: ParsedAudit, verdict: str, node: dict, candidate: dict
+    ) -> tuple[str, str]:
+        raw = parsed.invalidate.strip()
+        current = node["key"]
+        if raw.casefold() in ("", "none", "current"):
+            return "current", ""
+        if raw.casefold() == "plan":
+            if verdict != "REJECT" or parsed.insert_substep:
+                return "invalid", "PLAN invalidation is only valid with REJECT and without insertion."
+            return "plan", ""
+        if raw == node["step_id"]:
+            if node["substep_id"] is not None and verdict == "REJECT":
+                if parsed.insert_substep:
+                    return "invalid", "A parent target is valid only with REJECT."
+                return f"parent:{raw}", ""
+            return "current", ""
+        nodes, by_key, dependency_map = graph(candidate)
+        if raw in {step.id for step in candidate["steps"]}:
+            allowed = parent_ancestors(node["step_id"], candidate["steps"])
+            if raw in allowed and all(
+                f"{raw}.{child.id}" in candidate["accepted"]
+                for step in candidate["steps"] if step.id == raw
+                for child in step.substeps
+            ):
+                if verdict != "REJECT" or parsed.insert_substep:
+                    return "invalid", "An ancestor target is valid only with REJECT."
+                return f"parent:{raw}", ""
+            return "invalid", "Parent target is not an accepted strict ancestor."
+        if raw in by_key:
+            if raw in ancestors(current, dependency_map) and raw in candidate["accepted"]:
+                if verdict != "REJECT" or parsed.insert_substep:
+                    return "invalid", "A child ancestor target is valid only with REJECT."
+                return f"node:{raw}", ""
+        return "invalid", "Audit target is unknown, unaccepted, future, or unrelated."
+
+    def accepted_context(node: dict, candidate: dict) -> list[dict]:
+        nodes, by_key, dependencies = graph(candidate)
+        required = set(dependencies[node["key"]])
+        return [
+            {
+                "step_id": by_key[item["key"]]["step_id"],
+                **(
+                    {"substep_id": by_key[item["key"]]["substep_id"]}
+                    if by_key[item["key"]]["substep_id"] else {}
+                ),
+                "goal": by_key[item["key"]]["goal"],
+                "content": candidate["accepted"][item["key"]]["content"],
+            }
+            for item in nodes
+            if item["key"] in required and item["key"] in candidate["accepted"]
+        ]
+
+    def sync_failure(code: str, message: str) -> None:
+        result.status = "failed"
+        result.error_code = code
+        result.error = message
+        result.accepted_steps = _aggregate_accepted(state["steps"], state["accepted"])
+        result.attempts = state["attempts"]
 
     try:
         log.emit(
@@ -703,6 +1367,9 @@ def run_autonomous_derivation(
             [{"role": "user", "text": task.derivation_prompt}],
             _token_handler(log, "planning", "derivation"),
         )
+        plan_candidate = deepcopy(state)
+        plan_candidate["planner_responses"].append(plan_text)
+        publish(plan_candidate)
         (run_dir / "plan_raw.md").write_text(plan_text, encoding="utf-8")
         steps = parse_plan(plan_text)
         (
@@ -711,15 +1378,25 @@ def run_autonomous_derivation(
             result.strategy,
             result.assumptions,
         ) = _plan_overview(plan_text)
-        if not re.search(r"lagrangian|action|\bL\s*=", steps[0].goal, re.IGNORECASE):
+        state["interpretation"] = result.interpretation
+        state["lagrangian"] = result.lagrangian
+        state["strategy"] = result.strategy
+        state["assumptions"] = list(result.assumptions)
+        first_goal = steps[0].substeps[0].goal
+        if not re.search(r"lagrangian|action|\bL\s*=", first_goal, re.IGNORECASE):
             raise PlanError(
                 "first plan step must establish and justify the Lagrangian "
-                f"(first step goal was: {steps[0].goal[:160]!r})"
+                f"(first substep goal was: {first_goal[:160]!r})"
             )
-        step_by_id = {step.id: step for step in steps}
-        pending = [step.id for step in steps]
-        result.plan = [asdict(step) for step in steps]
-        (run_dir / "plan.json").write_text(json.dumps(result.plan, indent=2), encoding="utf-8")
+        state["steps"] = steps
+        nodes = _step_nodes(steps)
+        state["node_statuses"] = {node["key"]: "pending" for node in nodes}
+        state["retired_ids"] = set(state["node_statuses"])
+        enqueue(state)
+        (run_dir / "plan.json").write_text(
+            json.dumps([_step_dict(step) for step in steps], indent=2), encoding="utf-8"
+        )
+        publish(deepcopy(state))
         _write_markdown_reports(result)
         log.emit(
             "plan.ready",
@@ -731,492 +1408,128 @@ def run_autonomous_derivation(
             steps=result.plan,
             message="Derivation plan is ready.",
         )
-
-        while pending:
-            step_id = pending.pop(0)
-            step = step_by_id[step_id]
-            unmet = [dependency for dependency in step.depends_on if dependency not in accepted]
-            if unmet:
-                pending.insert(0, step_id)
-                continue
-            attempt_number = sum(row.step_id == step_id for row in result.attempts) + 1
-            prior_feedback = accepted.get(step_id, {}).get("feedback", "")
-            dependencies = [
-                {
-                    "step_id": dependency,
-                    "goal": accepted[dependency]["goal"],
-                    "content": accepted[dependency]["content"],
-                }
-                for dependency in step.depends_on
+        while state["status"] == "running":
+            unfinished = [
+                key for key, status in state["node_statuses"].items()
+                if status not in ("accepted", "blocked")
             ]
-            prompt = {
-                "problem_context": {
-                    "interpretation": result.interpretation,
-                    "assumptions": result.assumptions,
-                    "strategy": result.strategy,
-                },
-                "planner_lagrangian": result.lagrangian,
-                "current_step": {"id": step.id, "goal": step.goal},
-                "accepted_dependencies": dependencies,
-                "notation_contract": result.notation_contract,
-            }
-            if prior_feedback:
-                prompt["revision_mode"] = {
-                    "previous_proposal": accepted.get(step_id, {}).get("proposal", ""),
-                    "blocking_issues": accepted.get(step_id, {}).get("blocking_lines", []),
-                    "open_issue_ids": sorted(result.open_issues.get(step_id, {})),
-                }
-            if step_id == steps[0].id:
-                prompt["original_problem"] = task.derivation_prompt
-            if step_id == steps[-1].id and result.minor_notes:
-                prompt["polish_notes"] = result.minor_notes
-            log.emit(
-                "step.generating",
-                "generating",
-                step_id=step_id,
-                attempt=attempt_number,
-                goal=step.goal,
-            )
-            proposal_parts = []
-            try:
-                proposal = _complete(
-                    derivation_llm,
-                    DERIVATION_SYSTEM,
-                    [{"role": "user", "text": json.dumps(prompt, ensure_ascii=False)}],
-                    _token_handler(log, "generating", "derivation", step_id, proposal_parts),
-                )
-            except LLMError as exc:
-                result.attempts.append(
-                    StepAttempt(
-                        step_id,
-                        attempt_number,
-                        "".join(proposal_parts),
-                        "UNAVAILABLE",
-                        str(exc),
-                        "generation_failed",
+            if not unfinished:
+                if task.name == "phi4_dim4":
+                    content = "\n\n".join(
+                        row["content"] for row in result.accepted_steps
                     )
-                )
-                raise
-            if not proposal.strip():
-                result.attempts.append(
-                    StepAttempt(
-                        step_id,
-                        attempt_number,
-                        proposal,
-                        "UNCERTAIN",
-                        "Derivation agent returned an empty step.",
-                        "generation_failed",
-                    )
-                )
-                raise LLMError(f"Derivation agent returned an empty step for {step_id!r}.")
-            revision_ids = prompt.get("revision_mode", {}).get("open_issue_ids", [])
-            notes = proposal.rsplit("Revision notes", 1)[-1] if "Revision notes" in proposal else ""
-            missing_revision_ids = [issue_id for issue_id in revision_ids if issue_id not in notes]
-            if missing_revision_ids:
-                repair_prompt = dict(prompt)
-                repair_prompt["revision_notes_correction"] = (
-                    "Return the full revised proposal again and end with Revision notes containing "
-                    "one line for every issue id. Missing ids: " + ", ".join(missing_revision_ids)
-                )
-                proposal = _complete(
-                    derivation_llm,
-                    DERIVATION_SYSTEM,
-                    [{"role": "user", "text": json.dumps(repair_prompt, ensure_ascii=False)}],
-                    _token_handler(log, "generating", "derivation", step_id),
-                )
-            hygiene = _hygiene_problem(proposal, step_id == steps[-1].id)
-            if hygiene:
-                result.attempts.append(
-                    StepAttempt(
-                        step_id,
-                        attempt_number,
-                        proposal,
-                        "HYGIENE",
-                        hygiene,
-                        "hygiene_rejected",
-                    )
-                )
-                _write_markdown_reports(result)
-                if retry_counts.get(step_id, 0) >= max_step_retries:
-                    result.status = "retry_exhausted"
-                    result.error = f"Step {step_id!r} failed hygiene checks: {hygiene}"
-                    break
-                retry_counts[step_id] = retry_counts.get(step_id, 0) + 1
-                accepted[step_id] = {"feedback": hygiene}
-                pending.insert(0, step_id)
-                log.emit(
-                    "step.rejected",
-                    "rejected",
-                    step_id=step_id,
-                    attempt=attempt_number,
-                    diagnostic=hygiene,
-                    audit_verdict="HYGIENE",
-                )
-                continue
-            log.emit("step.awaiting_audit", "awaiting_audit", step_id=step_id)
-            relevant_checkpoint_ids = _ancestors(step_id, step_by_id)
-            accepted_context = [
-                {
-                    "step_id": item.id,
-                    "goal": item.goal,
-                    "content": accepted[item.id]["content"],
-                }
-                for item in steps
-                if item.id in relevant_checkpoint_ids and item.id in accepted
-            ]
-            step_ledger = ledgers.setdefault(step_id, IssueLedger())
-            audit_prompt = {
-                "original_problem": task.derivation_prompt,
-                "plan": result.plan,
-                "problem_context": {
-                    "interpretation": result.interpretation,
-                    "assumptions": result.assumptions,
-                    "strategy": result.strategy,
-                },
-                "planner_lagrangian": result.lagrangian,
-                "current_step": {"id": step.id, "goal": step.goal, "proposal": proposal},
-                "accepted_checkpoints": accepted_context,
-                "notation_contract": result.notation_contract,
-                "previous_blocking_issues": [
-                    {
-                        "id": issue.harness_id,
-                        "status": issue.status,
-                        "open_rounds": issue.open_rounds,
-                        "text": issue.text,
+                    log.emit("verification.started", "verifying")
+                    report = verify_final_answer(content)
+                    checks = report.to_dict()
+                    verification = {
+                        "available": True,
+                        "passed": report.passed,
+                        "kind": "deterministic",
+                        "checks": checks,
                     }
-                    for issue in step_ledger.issues.values()
-                ],
-                "instruction": (
-                    "Audit only; do not solve. Output the line-based format from the system "
-                    "prompt. PREVIOUS must cover every previous blocking issue id."
-                ),
-            }
-            raw_audits = []
-            parsed_audit = None
-            decision = "CONTRADICTORY"
-            for audit_index in range(3):
-                audit_parts = []
-                if audit_index:
-                    audit_prompt["instruction"] = (
-                        "Re-audit the exact same proposal. Your previous response was contradictory "
-                        "or unparseable. Output the required line-based format; BLOCKING must be none "
-                        "for ACCEPT and contain at least one real item for REJECT."
+                    candidate = deepcopy(state)
+                    candidate["verification"] = verification
+                    if report.passed:
+                        if candidate["attempts"]:
+                            last_attempt = max(
+                                (
+                                    index
+                                    for index, item in enumerate(candidate["attempts"])
+                                    if item.status == "accepted"
+                                ),
+                                default=None,
+                            )
+                            if last_attempt is not None:
+                                candidate["attempts"][last_attempt].deterministic_checks = checks
+                        last_content = result.accepted_steps[-1]["content"] if result.accepted_steps else ""
+                        matches = _FINAL_BLOCK.findall(last_content)
+                        candidate["final_amplitude"] = matches[-1] if matches else last_content
+                        publish(candidate)
+                        log.emit("verification.finished", "verifying", passed=True, checks=checks)
+                        break
+                    nodes_now, by_key_now, deps_now = graph(candidate)
+                    final_owners = [
+                        item["key"]
+                        for item in nodes_now
+                        if _FINAL_BLOCK.search(
+                            candidate["accepted"].get(item["key"], {}).get("content", "")
+                        )
+                    ]
+                    failed_key = final_owners[-1] if final_owners else nodes_now[-1]["key"]
+                    failed_node = by_key_now[failed_key]
+                    attempt_index = next(
+                        index for index in range(len(candidate["attempts"]) - 1, -1, -1)
+                        if candidate["attempts"][index].step_id == failed_node["step_id"]
+                        and candidate["attempts"][index].substep_id == failed_node["substep_id"]
                     )
-                try:
-                    audit_response = _complete(
-                        audit_llm,
-                        AUDIT_SYSTEM,
-                        [{"role": "user", "text": json.dumps(audit_prompt, ensure_ascii=False)}],
-                        _token_handler(log, "awaiting_audit", "audit", step_id, audit_parts),
-                    )
-                except LLMError as exc:
-                    result.attempts.append(
-                        StepAttempt(
-                            step_id,
-                            attempt_number,
-                            proposal,
-                            "UNAVAILABLE",
-                            str(exc),
-                            "audit_failed",
-                            "\n\n--- RE-AUDIT ---\n\n".join(raw_audits + ["".join(audit_parts)]),
+                    failed_attempt = candidate["attempts"][attempt_index]
+                    failed_attempt.status = "deterministic_rejection"
+                    failed_attempt.deterministic_checks = checks
+                    diagnostic = "Deterministic checks failed: " + ", ".join(report.failed_names)
+                    affected = {failed_key}
+                    changed = True
+                    while changed:
+                        changed = False
+                        for item in nodes_now:
+                            if item["key"] not in affected and any(
+                                dependency in affected
+                                for dependency in deps_now[item["key"]]
+                            ):
+                                affected.add(item["key"])
+                                changed = True
+                    ordered_affected = [
+                        item["key"] for item in nodes_now if item["key"] in affected
+                    ]
+                    exhausted = [
+                        item
+                        for item in ordered_affected
+                        if candidate["retry_counts"].get(item, 0)
+                        >= retry_limit(by_key_now[item])
+                    ]
+                    if exhausted:
+                        for item in ordered_affected:
+                            candidate["accepted"].pop(item, None)
+                            candidate["node_statuses"][item] = "pending"
+                        _exhaust_node(
+                            candidate, failed_key, nodes_now, deps_now, diagnostic
+                        )
+                        publish(candidate)
+                        log.emit("verification.finished", "verifying", passed=False, checks=checks)
+                        break
+                    for item in ordered_affected:
+                        candidate["accepted"].pop(item, None)
+                        candidate["node_statuses"][item] = "pending"
+                        candidate["retry_counts"][item] = (
+                            candidate["retry_counts"].get(item, 0) + 1
+                        )
+                        candidate["feedback"][item] = diagnostic
+                    candidate["queue"] = [failed_key] + [
+                        item for item in candidate["queue"] if item not in affected
+                    ]
+                    candidate["verification"] = verification
+                    invalidated = [
+                        _display_node_key(item, candidate["steps"])
+                        for item in ordered_affected
+                    ]
+                    candidate["backtracking"].append(
+                        Backtrack(
+                            _display_node_key(failed_key, candidate["steps"]),
+                            invalidated,
+                            diagnostic,
                         )
                     )
-                    raise
-                raw_audits.append(audit_response)
-                try:
-                    legacy = _json_object(audit_response)
-                except (json.JSONDecodeError, ValueError):
-                    legacy = None
-                if legacy is not None:
-                    legacy_verdict = str(legacy.get("verdict", "")).upper()
-                    legacy_diagnostic = str(legacy.get("diagnostic", "")).strip()
-                    parsed_audit = ParsedAudit(
-                        verdict=legacy_verdict,
-                        blocking=[legacy_diagnostic] if legacy_verdict == "REJECT" and legacy_diagnostic else [],
-                        invalidate=(
-                            "none"
-                            if legacy.get("target_step_id") in (None, step_id)
-                            else str(legacy.get("target_step_id"))
-                        ),
-                    )
-                else:
-                    parsed_audit = parse_audit(audit_response)
-                decision = decide(parsed_audit)
-                if decision != "CONTRADICTORY":
-                    break
-                log.emit(
-                    "step.audit_retried",
-                    "awaiting_audit",
-                    step_id=step_id,
-                    audit_number=audit_index + 1,
-                    response=audit_response,
-                )
-            assert parsed_audit is not None
-            warning = ""
-            if decision == "CONTRADICTORY":
-                if parsed_audit.verdict == "ACCEPT" and parsed_audit.blocking:
-                    decision = "REJECT"
-                elif parsed_audit.verdict == "REJECT" and not parsed_audit.blocking:
-                    decision = "ACCEPT"
-                    warning = "Audit rejected with no blocking items after two re-audits; accepted."
-                else:
-                    decision = "REJECT"
-            audit_response = "\n\n--- RE-AUDIT ---\n\n".join(raw_audits)
-            verdict = decision
-            diagnostic = "\n".join(parsed_audit.blocking)
-            target_id = step_id
-            if parsed_audit.invalidate.casefold() != "none":
-                target_id = parsed_audit.invalidate.split("|", 1)[0].strip()
-            log.emit(
-                "step.audit",
-                "accepted" if verdict == "ACCEPT" else "rejected",
-                step_id=step_id,
-                verdict=verdict,
-                target_step_id=target_id,
-                diagnostic=diagnostic,
-                response=audit_response,
-            )
-            attempt = StepAttempt(
-                step_id=step_id,
-                attempt=attempt_number,
-                proposal=proposal,
-                verdict=verdict,
-                diagnostic=diagnostic,
-                status="accepted" if verdict == "ACCEPT" else "rejected",
-                audit_response=audit_response,
-            )
-            result.attempts.append(attempt)
-            step_ledger.apply_previous(parsed_audit.previous)
-            step_ledger.add_minor(parsed_audit.minor)
-            result.minor_notes = [note for item in ledgers.values() for note in item.minor]
-            _write_markdown_reports(result)
-
-            needs_replan = target_id.casefold() == "plan" or any(
-                issue.open_rounds >= 2 for issue in step_ledger.open_issues()
-            )
-            if needs_replan and replans_used < max_replans:
-                corrections = diagnostic or "; ".join(
-                    issue.text for issue in step_ledger.open_issues()
-                )
-                replan_prompt = (
-                    task.derivation_prompt
-                    + "\n\nAudit-established corrections: "
-                    + (corrections or parsed_audit.invalidate)
-                )
-                new_plan_text = _complete(
-                    derivation_llm,
-                    PLAN_SYSTEM,
-                    [{"role": "user", "text": replan_prompt}],
-                    _token_handler(log, "planning", "derivation"),
-                )
-                replans_used += 1
-                new_steps = parse_plan(new_plan_text)
-                old_goals = {item.id: item.goal for item in steps}
-                unchanged = {
-                    item.id
-                    for item in new_steps
-                    if old_goals.get(item.id) == item.goal and item.id in accepted
-                }
-                invalidated = [item.id for item in steps if item.id in accepted and item.id not in unchanged]
-                accepted = {key: value for key, value in accepted.items() if key in unchanged}
-                steps = new_steps
-                step_by_id = {item.id: item for item in steps}
-                pending = [item.id for item in steps if item.id not in accepted]
-                result.plan = [asdict(item) for item in steps]
-                result.backtracking.append(Backtrack("PLAN", invalidated, corrections))
-                attempt.status = "replan_triggered"
-                log.emit(
-                    "backtracking.started",
-                    "planning",
-                    target_step_id="PLAN",
-                    invalidated_steps=invalidated,
-                    diagnostic=corrections,
-                )
-                _write_markdown_reports(result)
-                continue
-
-            if target_id != step_id and target_id in step_by_id:
-                affected = _descendants(target_id, steps)
-                invalidated = affected & set(accepted)
-                prior_target = accepted.get(target_id, {})
-                for invalid_id in invalidated:
-                    accepted.pop(invalid_id, None)
-                    if invalid_id != target_id:
-                        retry_counts[invalid_id] = 0
-                accepted[target_id] = {
-                    "feedback": diagnostic,
-                    "proposal": prior_target.get("content", prior_target.get("proposal", "")),
-                    "blocking_lines": parsed_audit.blocking,
-                }
-                result.backtracking.append(
-                    Backtrack(
-                        target_id,
-                        [item.id for item in steps if item.id in affected],
-                        diagnostic,
-                    )
-                )
-                attempt.status = "backtrack_triggered"
-                log.emit(
-                    "backtracking.started",
-                    "revising",
-                    target_step_id=target_id,
-                    invalidated_steps=sorted(invalidated),
-                    diagnostic=diagnostic,
-                )
-                result.accepted_steps = [
-                    {
-                        "step_id": item.id,
-                        "goal": item.goal,
-                        "content": accepted[item.id]["content"],
-                        "audit": accepted[item.id]["audit"],
-                        "attempt": accepted[item.id]["attempt"],
-                    }
-                    for item in steps
-                    if item.id in accepted and "content" in accepted[item.id]
-                ]
-                _write_markdown_reports(result)
-                if retry_counts.get(target_id, 0) >= max_step_retries:
-                    result.status = "retry_exhausted"
-                    result.error = (
-                        f"Checkpoint {target_id!r} exhausted its correction attempts "
-                        "after an audit backtrack."
-                    )
-                    break
-                retry_counts[target_id] = retry_counts.get(target_id, 0) + 1
-                pending = [item.id for item in steps if item.id in affected] + [
-                    queued for queued in pending if queued not in affected
-                ]
-                continue
-
-            if verdict != "ACCEPT":
-                opened = step_ledger.add_blocking(parsed_audit.blocking, attempt_number)
-                diagnostic = "\n".join(issue.text for issue in opened)
-                attempt.diagnostic = diagnostic
-                result.issue_ledger[step_id] = step_ledger.to_dict()
-                result.open_issues[step_id] = {
-                    issue.harness_id: issue.text for issue in step_ledger.open_issues()
-                }
-                log.emit(
-                    "step.rejected",
-                    "rejected",
-                    step_id=step_id,
-                    attempt=attempt_number,
-                    diagnostic=diagnostic,
-                    audit_verdict=verdict,
-                )
-                if retry_counts.get(step_id, 0) >= max_step_retries:
-                    result.status = "retry_exhausted"
-                    result.error = (
-                        f"Step {step_id!r} was not accepted after {attempt_number} attempts."
-                    )
-                    break
-                retry_counts[step_id] = retry_counts.get(step_id, 0) + 1
-                accepted[step_id] = {
-                    "feedback": diagnostic,
-                    "proposal": proposal,
-                    "blocking_lines": [issue.text for issue in opened],
-                }
-                pending.insert(0, step_id)
-                log.emit(
-                    "step.revising",
-                    "revising",
-                    step_id=step_id,
-                    retries_used=retry_counts[step_id],
-                    max_step_retries=max_step_retries,
-                )
-                _write_markdown_reports(result)
-                continue
-
-            if warning:
-                log.emit("step.audit_warning", "accepted", step_id=step_id, warning=warning)
-            step_ledger.close_all()
-            result.issue_ledger[step_id] = step_ledger.to_dict()
-            result.open_issues.pop(step_id, None)
-            accepted[step_id] = {
-                "goal": step.goal,
-                "content": proposal,
-                "feedback": "",
-                "attempt": attempt_number,
-                "audit": audit_response,
-            }
-            if step_id == steps[0].id:
-                checkpoints = _CHECKPOINT_BLOCK.findall(proposal)
-                result.notation_contract = (
-                    checkpoints[-1].strip() if checkpoints else proposal.strip()[:800]
-                )
-            result.accepted_steps = [
-                {
-                    "step_id": item.id,
-                    "goal": item.goal,
-                    "content": accepted[item.id]["content"],
-                    "audit": accepted[item.id]["audit"],
-                    "attempt": accepted[item.id]["attempt"],
-                }
-                for item in steps
-                if item.id in accepted and "content" in accepted[item.id]
-            ]
-            log.emit(
-                "step.accepted",
-                "accepted",
-                step_id=step_id,
-                attempt=attempt_number,
-                content=proposal,
-                audit=audit_response,
-            )
-            _write_markdown_reports(result)
-
-            if step_id == steps[-1].id and task.name == "phi4_dim4":
-                log.emit("verification.started", "verifying", step_id=step_id)
-                report = verify_final_answer(
-                    "\n\n".join(row["content"] for row in result.accepted_steps)
-                )
-                attempt.deterministic_checks = report.to_dict()
-                result.verification = {
-                    "available": True,
-                    "passed": report.passed,
-                    "kind": "deterministic",
-                    "checks": report.to_dict(),
-                }
-                log.emit(
-                    "verification.finished",
-                    "verifying",
-                    passed=report.passed,
-                    checks=report.to_dict(),
-                )
-                if not report.passed:
-                    attempt.status = "deterministic_rejection"
-                    diagnostic = "Deterministic checks failed: " + ", ".join(report.failed_names)
-                    accepted.pop(step_id, None)
-                    result.accepted_steps = [
-                        row for row in result.accepted_steps if row["step_id"] != step_id
-                    ]
-                    if retry_counts.get(step_id, 0) >= max_step_retries:
-                        result.status = "retry_exhausted"
-                        result.error = f"Final step {step_id!r} failed deterministic verification."
-                        break
-                    retry_counts[step_id] = retry_counts.get(step_id, 0) + 1
-                    accepted[step_id] = {"feedback": diagnostic}
-                    pending.insert(0, step_id)
+                    publish(candidate)
+                    log.emit("verification.finished", "verifying", passed=False, checks=checks)
                     log.emit(
-                        "step.rejected",
-                        "rejected",
-                        step_id=step_id,
-                        attempt=attempt_number,
+                        "backtracking.started",
+                        "revising",
+                        target_step_id=_display_node_key(failed_key, candidate["steps"]),
+                        invalidated_steps=invalidated,
                         diagnostic=diagnostic,
-                        audit_verdict="ACCEPT",
-                        deterministic_failure=True,
                     )
                     continue
-                result.final_amplitude = _FINAL_BLOCK.findall(proposal)[-1]
-
-        if not pending and result.status == "failed":
-            result.status = (
-                "completed_verified"
-                if result.verification.get("passed")
-                else ("completed_unverified")
-            )
-            if not result.verification:
-                result.verification = {
+                candidate = deepcopy(state)
+                candidate["verification"] = {
                     "available": False,
                     "passed": None,
                     "kind": "not_configured_for_task",
@@ -1225,8 +1538,677 @@ def run_autonomous_derivation(
                         "only the independent AI audit completed."
                     ),
                 }
-            if not result.final_amplitude and result.accepted_steps:
-                result.final_amplitude = result.accepted_steps[-1]["content"]
+                last_content = result.accepted_steps[-1]["content"] if result.accepted_steps else ""
+                matches = _FINAL_BLOCK.findall(last_content)
+                candidate["final_amplitude"] = matches[-1] if matches else last_content
+                publish(candidate)
+                break
+            if not state["queue"]:
+                candidate = deepcopy(state)
+                candidate["status"] = "failed"
+                candidate["error_code"] = "scheduler_stalled"
+                candidate["error"] = (
+                    "Checkpoint scheduler stalled with unfinished nodes: "
+                    + ", ".join(unfinished)
+                )
+                publish(candidate)
+                break
+
+            key = state["queue"][0]
+            nodes, by_key, dependency_map = graph(state)
+            node = by_key.get(key)
+            if node is None or any(dependency not in state["accepted"] for dependency in dependency_map[key]):
+                candidate = deepcopy(state)
+                candidate["queue"] = [item for item in candidate["queue"] if item != key]
+                publish(candidate)
+                continue
+            candidate = deepcopy(state)
+            candidate["queue"].pop(0)
+            candidate["node_statuses"][key] = "generating"
+            publish(candidate)
+            state_node = by_key[key]
+            step = next(item for item in state["steps"] if item.id == state_node["step_id"])
+            child = next(item for item in step.substeps if item.id == (state_node["substep_id"] or "main"))
+            attempt_number = sum(
+                attempt.step_id == node["step_id"] and attempt.substep_id == node["substep_id"]
+                for attempt in state["attempts"]
+            ) + 1
+            dependency_rows = accepted_context(node, state)
+            prompt = {
+                "problem_context": {
+                    "interpretation": result.interpretation,
+                    "assumptions": result.assumptions,
+                    "strategy": result.strategy,
+                },
+                "planner_lagrangian": result.lagrangian,
+                "current_step": {
+                    "id": node["step_id"],
+                    "goal": step.goal,
+                    "substep_id": node["substep_id"] or "main",
+                    "substep_goal": child.goal,
+                },
+                "accepted_dependencies": dependency_rows,
+                "notation_contract": result.notation_contract,
+            }
+            feedback = state["feedback"].get(key, "")
+            if feedback:
+                prompt["revision_mode"] = {
+                    "previous_proposal": state["accepted"].get(key, {}).get("proposal", ""),
+                    "blocking_issues": state["accepted"].get(key, {}).get("blocking_lines", []),
+                    "open_issue_ids": sorted(result.open_issues.get(key, {})),
+                    "diagnostic": feedback,
+                }
+            first_node = nodes[0]["key"]
+            if key == first_node:
+                prompt["original_problem"] = task.derivation_prompt
+            last_node = nodes[-1]["key"]
+            event_ids = {"step_id": node["step_id"]}
+            if node["substep_id"] is not None:
+                event_ids["substep_id"] = node["substep_id"]
+            log.emit(
+                "step.generating",
+                "generating",
+                **event_ids,
+                attempt=attempt_number,
+                goal=child.goal,
+            )
+            proposal_parts = []
+            try:
+                proposal = _complete(
+                    derivation_llm,
+                    DERIVATION_SYSTEM,
+                    [{"role": "user", "text": json.dumps(prompt, ensure_ascii=False)}],
+                    _token_handler(
+                        log,
+                        "generating",
+                        "derivation",
+                        node["step_id"],
+                        proposal_parts,
+                        node["substep_id"],
+                    ),
+                )
+            except LLMError as exc:
+                candidate = deepcopy(state)
+                candidate["attempts"].append(
+                    StepAttempt(
+                        node["step_id"],
+                        attempt_number,
+                        "".join(proposal_parts),
+                        "UNAVAILABLE",
+                        str(exc),
+                        "generation_failed",
+                        substep_id=node["substep_id"],
+                    )
+                )
+                candidate["node_statuses"][key] = "generation_failed"
+                publish(candidate)
+                raise
+            if not proposal.strip():
+                candidate = deepcopy(state)
+                candidate["attempts"].append(
+                    StepAttempt(
+                        node["step_id"],
+                        attempt_number,
+                        proposal,
+                        "UNCERTAIN",
+                        "Derivation agent returned an empty step.",
+                        "generation_failed",
+                        substep_id=node["substep_id"],
+                    )
+                )
+                candidate["node_statuses"][key] = "generation_failed"
+                publish(candidate)
+                raise LLMError(f"Derivation agent returned an empty step for {key!r}.")
+
+            attempt = StepAttempt(
+                node["step_id"],
+                attempt_number,
+                proposal,
+                "PENDING",
+                "",
+                "generated",
+                substep_id=node["substep_id"],
+            )
+            candidate = deepcopy(state)
+            candidate["attempts"].append(attempt)
+            candidate["node_statuses"][key] = "awaiting_audit"
+            publish(candidate)
+            attempt_index = len(state["attempts"]) - 1
+            hygiene = _hygiene_problem(proposal, key == last_node)
+            if hygiene:
+                attempt = deepcopy(state["attempts"][attempt_index])
+                attempt.verdict = "HYGIENE"
+                attempt.diagnostic = hygiene
+                attempt.status = "hygiene_rejected"
+                candidate = deepcopy(state)
+                candidate["attempts"][attempt_index] = attempt
+                candidate["node_statuses"][key] = "rejected"
+                candidate["feedback"][key] = hygiene
+                if candidate["retry_counts"].get(key, 0) >= retry_limit(node):
+                    _exhaust_node(candidate, key, nodes, dependency_map, hygiene)
+                    publish(candidate)
+                    log.emit(
+                        "step.rejected",
+                        "rejected",
+                        **event_ids,
+                        attempt=attempt_number,
+                        diagnostic=hygiene,
+                        audit_verdict="HYGIENE",
+                    )
+                    break
+                candidate["retry_counts"][key] = candidate["retry_counts"].get(key, 0) + 1
+                candidate["node_statuses"][key] = "pending"
+                enqueue(candidate, [key], front=True)
+                publish(candidate)
+                log.emit(
+                    "step.rejected",
+                    "rejected",
+                    **event_ids,
+                    attempt=attempt_number,
+                    diagnostic=hygiene,
+                    audit_verdict="HYGIENE",
+                )
+                continue
+
+            log.emit("step.awaiting_audit", "awaiting_audit", **event_ids)
+            audit_prompt = {
+                "plan": result.plan,
+                "problem_context": prompt["problem_context"],
+                "planner_lagrangian": result.lagrangian,
+                "current_step": {
+                    **prompt["current_step"],
+                    "proposal": proposal,
+                },
+                "accepted_checkpoints": dependency_rows,
+                "notation_contract": result.notation_contract,
+                "previous_blocking_issues": [
+                    {
+                        "id": issue.harness_id,
+                        "status": issue.status,
+                        "open_rounds": issue.open_rounds,
+                        "text": issue.text,
+                    }
+                    for issue in state["ledgers"].get(key, IssueLedger()).issues.values()
+                ],
+                "instruction": (
+                    "Audit only; do not solve. Output the line-based format from the system "
+                    "prompt. PREVIOUS must cover every previous blocking issue id."
+                ),
+            }
+            if key == first_node:
+                audit_prompt["original_problem"] = task.derivation_prompt
+            raw_audits = []
+            chosen = None
+            chosen_target = "current"
+            target_diagnostic = ""
+            for audit_index in range(3):
+                if audit_index:
+                    audit_prompt["instruction"] = (
+                        "Re-audit the exact same proposal. The previous response was contradictory "
+                        "or unparseable. Return the required format without contradictory metadata."
+                    )
+                audit_parts = []
+                try:
+                    audit_response = _complete(
+                        audit_llm,
+                        AUDIT_SYSTEM,
+                        [{"role": "user", "text": json.dumps(audit_prompt, ensure_ascii=False)}],
+                        _token_handler(
+                            log,
+                            "awaiting_audit",
+                            "audit",
+                            node["step_id"],
+                            audit_parts,
+                            node["substep_id"],
+                        ),
+                    )
+                except LLMError as exc:
+                    candidate = deepcopy(state)
+                    failed_attempt = deepcopy(candidate["attempts"][attempt_index])
+                    failed_attempt.verdict = "UNAVAILABLE"
+                    failed_attempt.diagnostic = str(exc)
+                    failed_attempt.status = "audit_failed"
+                    candidate["attempts"][attempt_index] = failed_attempt
+                    candidate["node_statuses"][key] = "audit_failed"
+                    publish(candidate)
+                    raise
+                raw_audits.append(audit_response)
+                parsed = _audit_payload(audit_response, key)
+                decision = decide(parsed)
+                target_kind, target_error = authorized_target(
+                    parsed, parsed.verdict, node, state
+                )
+                if decision != "CONTRADICTORY" and target_kind != "invalid":
+                    if parsed.insert_substep and target_kind != "current":
+                        target_error = "Insertion cannot be combined with invalidation."
+                        target_kind = "invalid"
+                    if parsed.verdict == "ACCEPT" and parsed.insert_substep:
+                        target_error = "Insertion is only valid with REJECT."
+                        target_kind = "invalid"
+                    if parsed.insert_substep and not target_error:
+                        target_error = _validate_insertion(
+                            parsed.insert_substep,
+                            node,
+                            state,
+                            max_substep_insertions,
+                            retry_limit(node),
+                        )
+                        if target_error:
+                            target_kind = "invalid"
+                if decision != "CONTRADICTORY" and target_kind != "invalid":
+                    chosen = parsed
+                    chosen_target = target_kind
+                    break
+                target_diagnostic = target_error or "; ".join(parsed.format_errors) or (
+                    "Audit response was contradictory or malformed."
+                )
+                log.emit(
+                    "step.audit_retried",
+                    "awaiting_audit",
+                    **event_ids,
+                    audit_number=audit_index + 1,
+                    response=audit_response,
+                )
+            if chosen is None:
+                chosen = ParsedAudit(
+                    verdict="REJECT",
+                    blocking=[target_diagnostic or "Audit metadata remained contradictory."],
+                )
+                chosen_target = "current"
+            audit_response = "\n\n--- RE-AUDIT ---\n\n".join(raw_audits)
+            verdict = chosen.verdict
+            diagnostic = "\n".join(chosen.blocking)
+            audit_attempt = deepcopy(state["attempts"][attempt_index])
+            audit_attempt.verdict = verdict
+            audit_attempt.diagnostic = diagnostic
+            audit_attempt.audit_response = audit_response
+            audit_attempt.status = "accepted" if verdict == "ACCEPT" else "rejected"
+            candidate = deepcopy(state)
+            candidate["attempts"][attempt_index] = audit_attempt
+            ledger = candidate["ledgers"].setdefault(key, IssueLedger())
+            ledger.apply_previous(chosen.previous)
+            ledger.add_minor(chosen.minor)
+            opened = []
+            if verdict != "ACCEPT":
+                opened = ledger.add_blocking(chosen.blocking, attempt_number)
+                diagnostic = "\n".join(issue.text for issue in opened) or diagnostic
+                audit_attempt.diagnostic = diagnostic
+                candidate["attempts"][attempt_index] = audit_attempt
+                candidate["node_statuses"][key] = "rejected"
+            candidate["ledgers"][key] = ledger
+            publish(candidate)
+            candidate = deepcopy(state)
+            log.emit(
+                "step.audit",
+                "accepted" if verdict == "ACCEPT" else "rejected",
+                **event_ids,
+                verdict=verdict,
+                target_step_id=(
+                    node["step_id"]
+                    if chosen_target == "current"
+                    else chosen_target.split(":", 1)[-1].upper()
+                    if chosen_target == "plan"
+                    else chosen_target.split(":", 1)[-1]
+                ),
+                diagnostic=diagnostic,
+                response=audit_response,
+            )
+            if verdict != "ACCEPT":
+                if (
+                    chosen_target == "plan"
+                    and candidate["replans_used"] < max_replans
+                    and candidate["retry_counts"].get(key, 0) < retry_limit(node)
+                ):
+                    replan_prompt = (
+                        task.derivation_prompt
+                        + "\n\nAudit-established corrections: "
+                        + (diagnostic or "The current plan needs revision.")
+                    )
+                    new_plan_text = _complete(
+                        derivation_llm,
+                        PLAN_SYSTEM,
+                        [{"role": "user", "text": replan_prompt}],
+                        _token_handler(log, "planning", "derivation"),
+                    )
+                    plan_candidate = deepcopy(state)
+                    plan_candidate["planner_responses"].append(new_plan_text)
+                    publish(plan_candidate)
+                    candidate = deepcopy(state)
+                    new_steps = parse_plan(new_plan_text)
+                    new_first_goal = new_steps[0].substeps[0].goal
+                    if not re.search(r"lagrangian|action|\bL\s*=", new_first_goal, re.IGNORECASE):
+                        raise PlanError("first plan substep must establish and justify the Lagrangian")
+                    old_steps = candidate["steps"]
+                    old_nodes = _step_nodes(old_steps)
+                    old_keys = {item["key"] for item in old_nodes}
+                    new_nodes = _step_nodes(new_steps)
+                    new_keys = {item["key"] for item in new_nodes}
+                    fresh_ids = new_keys - old_keys
+                    if fresh_ids & candidate["retired_ids"]:
+                        raise PlanError("replan attempted to reuse a retired substep ID")
+                    if len(candidate["retired_ids"] | new_keys) > 120:
+                        raise PlanError("replan exceeds the 120-node lifetime limit")
+                    old_signatures = _node_signatures(candidate["steps"])
+                    new_signatures = _node_signatures(new_steps)
+                    kept = {
+                        item for item in new_keys
+                        if item in candidate["accepted"]
+                        and old_signatures.get(item) == new_signatures.get(item)
+                    }
+                    new_by_key = {item["key"]: item for item in new_nodes}
+                    new_dep_map = {
+                        item["key"]: _node_dependencies(item, new_by_key, new_steps)
+                        for item in new_nodes
+                    }
+                    changed = True
+                    while changed:
+                        changed = False
+                        for item in tuple(kept):
+                            if any(dependency not in kept for dependency in new_dep_map[item]):
+                                kept.remove(item)
+                                changed = True
+                    invalidated = old_keys - kept
+                    replacements = {
+                        item for item in (old_keys & new_keys) - kept
+                        if item in candidate["accepted"] or item == key
+                    }
+                    exhausted_replacements = [
+                        item for item in replacements
+                        if candidate["retry_counts"].get(item, 0)
+                        >= retry_limit(next(node for node in old_nodes if node["key"] == item))
+                    ]
+                    if exhausted_replacements:
+                        old_by_key = {item["key"]: item for item in old_nodes}
+                        old_deps = {
+                            item["key"]: _node_dependencies(item, old_by_key, old_steps)
+                            for item in old_nodes
+                        }
+                        for item in invalidated:
+                            candidate["accepted"].pop(item, None)
+                        _exhaust_node(
+                            candidate,
+                            exhausted_replacements[0],
+                            old_nodes,
+                            old_deps,
+                            diagnostic,
+                        )
+                        publish(candidate)
+                        break
+                    for item in replacements:
+                        candidate["retry_counts"][item] = (
+                            candidate["retry_counts"].get(item, 0) + 1
+                        )
+                    candidate["accepted"] = {
+                        item: value for item, value in candidate["accepted"].items()
+                        if item in kept
+                    }
+                    candidate["retired_ids"].update(old_keys - new_keys)
+                    candidate["retired_ids"].update(fresh_ids)
+                    candidate["steps"] = new_steps
+                    candidate["node_statuses"] = {
+                        item: ("accepted" if item in kept else "pending")
+                        for item in new_keys
+                    }
+                    candidate["queue"] = []
+                    candidate["replans_used"] += 1
+                    candidate["feedback"][key] = diagnostic
+                    enqueue(candidate)
+                    candidate["backtracking"].append(
+                        Backtrack(
+                            "PLAN",
+                            [
+                                _display_node_key(item, old_steps)
+                                for item in sorted(invalidated)
+                            ],
+                            diagnostic,
+                        )
+                    )
+                    audit_attempt.status = "replan_triggered"
+                    candidate["attempts"][attempt_index] = audit_attempt
+                    publish(candidate)
+                    log.emit(
+                        "plan.updated",
+                        "planning",
+                        steps=result.plan,
+                        invalidated_steps=sorted(invalidated),
+                        reason="replan",
+                    )
+                    log.emit(
+                        "backtracking.started",
+                        "planning",
+                        target_step_id="PLAN",
+                        invalidated_steps=sorted(invalidated),
+                        diagnostic=diagnostic,
+                    )
+                    continue
+
+                if chosen_target.startswith(("parent:", "node:")):
+                    kind, target = chosen_target.split(":", 1)
+                    nodes_now, by_key_now, deps_now = graph(candidate)
+                    if kind == "parent":
+                        affected = {
+                            item["key"] for item in nodes_now if item["step_id"] == target
+                        }
+                    else:
+                        affected = {target}
+                    changed = True
+                    while changed:
+                        changed = False
+                        for candidate_node in nodes_now:
+                            if candidate_node["key"] not in affected and any(
+                                dependency in affected for dependency in deps_now[candidate_node["key"]]
+                            ):
+                                affected.add(candidate_node["key"])
+                                changed = True
+                    ordered_affected = [item["key"] for item in nodes_now if item["key"] in affected]
+                    exhausted = [
+                        affected_key for affected_key in ordered_affected
+                        if candidate["retry_counts"].get(affected_key, 0)
+                        >= retry_limit(by_key_now[affected_key])
+                        and (
+                            affected_key in candidate["accepted"]
+                            or affected_key == key
+                        )
+                    ]
+                    if exhausted:
+                        candidate["backtracking"].append(
+                            Backtrack(
+                                target,
+                                [
+                                    _display_node_key(item, candidate["steps"])
+                                    for item in ordered_affected
+                                ],
+                                diagnostic,
+                            )
+                        )
+                        for affected_key in ordered_affected:
+                            candidate["accepted"].pop(affected_key, None)
+                            candidate["node_statuses"][affected_key] = "pending"
+                        _exhaust_node(candidate, exhausted[0], nodes_now, deps_now, diagnostic)
+                        publish(candidate)
+                        break
+                    for affected_key in ordered_affected:
+                        if affected_key in candidate["accepted"] or affected_key == key:
+                            candidate["retry_counts"][affected_key] = (
+                                candidate["retry_counts"].get(affected_key, 0) + 1
+                            )
+                        candidate["accepted"].pop(affected_key, None)
+                        candidate["node_statuses"][affected_key] = "pending"
+                        candidate["feedback"][affected_key] = diagnostic
+                    candidate["queue"] = [
+                        item for item in candidate["queue"] if item not in affected
+                    ]
+                    enqueue(candidate, ordered_affected, front=True)
+                    candidate["backtracking"].append(
+                        Backtrack(
+                            target,
+                            [
+                                _display_node_key(item, candidate["steps"])
+                                for item in ordered_affected
+                            ],
+                            diagnostic,
+                        )
+                    )
+                    audit_attempt.status = "backtrack_triggered"
+                    candidate["attempts"][attempt_index] = audit_attempt
+                    publish(candidate)
+                    log.emit(
+                        "backtracking.started",
+                        "revising",
+                        target_step_id=target,
+                        invalidated_steps=ordered_affected,
+                        diagnostic=diagnostic,
+                    )
+                    continue
+
+                if chosen.insert_substep is not None:
+                    insertion = chosen.insert_substep
+                    parent = next(item for item in candidate["steps"] if item.id == node["step_id"])
+                    children = list(parent.substeps)
+                    child_index = next(
+                        index for index, item in enumerate(children)
+                        if item.id == (node["substep_id"] or "main")
+                    )
+                    child_id = insertion["id"]
+                    inserted = DerivationSubstep(
+                        child_id,
+                        insertion["goal"].strip(),
+                        tuple(insertion.get("depends_on", [])),
+                    )
+                    current_child = children[child_index]
+                    children.insert(child_index, inserted)
+                    children[child_index + 1] = DerivationSubstep(
+                        current_child.id,
+                        current_child.goal,
+                        tuple(dict.fromkeys((*current_child.depends_on, child_id))),
+                    )
+                    replacement_parent = DerivationStep(
+                        parent.id,
+                        parent.goal,
+                        parent.depends_on,
+                        tuple(children),
+                        True,
+                    )
+                    candidate["steps"] = [
+                        replacement_parent if item.id == parent.id else item
+                        for item in candidate["steps"]
+                    ]
+                    inserted_key = f"{parent.id}.{child_id}"
+                    candidate["node_statuses"][inserted_key] = "pending"
+                    candidate["retired_ids"].add(inserted_key)
+                    candidate["insertion_count"] += 1
+                    candidate["retry_counts"][key] = candidate["retry_counts"].get(key, 0) + 1
+                    candidate["feedback"][key] = diagnostic
+                    candidate["accepted"].pop(key, None)
+                    candidate["node_statuses"][key] = "pending"
+                    candidate["queue"] = [item for item in candidate["queue"] if item != key]
+                    enqueue(candidate, [inserted_key], front=True)
+                    audit_attempt.status = "insertion_triggered"
+                    candidate["attempts"][attempt_index] = audit_attempt
+                    publish(candidate)
+                    log.emit(
+                        "plan.updated",
+                        "revising",
+                        steps=result.plan,
+                        invalidated_steps=[key],
+                        reason="substep_inserted",
+                    )
+                    continue
+
+                candidate["feedback"][key] = diagnostic
+                if candidate["retry_counts"].get(key, 0) >= retry_limit(node):
+                    _exhaust_node(candidate, key, nodes, dependency_map, diagnostic)
+                    publish(candidate)
+                    log.emit(
+                        "step.rejected",
+                        "rejected",
+                        **event_ids,
+                        attempt=attempt_number,
+                        diagnostic=diagnostic,
+                        audit_verdict=verdict,
+                    )
+                    break
+                candidate["retry_counts"][key] = candidate["retry_counts"].get(key, 0) + 1
+                candidate["node_statuses"][key] = "pending"
+                candidate["queue"] = [key] + [item for item in candidate["queue"] if item != key]
+                publish(candidate)
+                log.emit(
+                    "step.rejected",
+                    "rejected",
+                    **event_ids,
+                    attempt=attempt_number,
+                    diagnostic=diagnostic,
+                    audit_verdict=verdict,
+                )
+                log.emit(
+                    "step.revising",
+                    "revising",
+                    **event_ids,
+                    retries_used=state["retry_counts"][key],
+                    max_step_retries=retry_limit(node),
+                )
+                continue
+
+            ledger.close_all()
+            candidate["ledgers"][key] = ledger
+            candidate["accepted"][key] = {
+                "goal": child.goal,
+                "content": proposal,
+                "feedback": "",
+                "attempt": attempt_number,
+                "audit": audit_response,
+                "proposal": proposal,
+            }
+            candidate["feedback"].pop(key, None)
+            candidate["node_statuses"][key] = "accepted"
+            if node["key"] == nodes[0]["key"]:
+                blocks = _CHECKPOINT_BLOCK.findall(proposal)
+                candidate["notation_contract"] = (
+                    blocks[-1].strip() if blocks else proposal.strip()[:800]
+                )
+            accepted_parent = all(
+                f"{step.id}.{item.id}" in candidate["accepted"]
+                for item in step.substeps
+            )
+            publish(candidate)
+            if accepted_parent:
+                parent_content = "\n\n".join(
+                    state["accepted"][f"{step.id}.{item.id}"]["content"]
+                    for item in step.substeps
+                )
+                parent_audit = "\n\n".join(
+                    state["accepted"][f"{step.id}.{item.id}"]["audit"]
+                    for item in step.substeps
+                )
+                log.emit(
+                    "step.accepted",
+                    "accepted",
+                    step_id=step.id,
+                    attempt=attempt_number,
+                    content=parent_content,
+                    audit=parent_audit,
+                )
+            if node["substep_id"] is not None:
+                log.emit(
+                    "substep.accepted",
+                    "accepted",
+                    **event_ids,
+                    attempt=attempt_number,
+                    content=proposal,
+                    audit=audit_response,
+                )
+            enqueue_candidate = deepcopy(state)
+            enqueue(enqueue_candidate)
+            if enqueue_candidate["queue"] != state["queue"]:
+                publish(enqueue_candidate)
+        if state["status"] == "running":
+            candidate = deepcopy(state)
+            candidate["status"] = (
+                "completed_verified"
+                if candidate.get("verification", {}).get("passed") is True
+                else "completed_unverified"
+            )
+            publish(candidate)
             log.emit(
                 "derivation.completed",
                 result.status,
@@ -1234,7 +2216,7 @@ def run_autonomous_derivation(
                 final_amplitude=result.final_amplitude,
                 verification=result.verification,
             )
-        elif result.status == "retry_exhausted":
+        elif state["status"] == "retry_exhausted":
             log.emit(
                 "derivation.completed",
                 "retry_exhausted",
@@ -1242,24 +2224,67 @@ def run_autonomous_derivation(
                 error=result.error,
                 accepted_steps=result.accepted_steps,
             )
-    except (LLMError, OSError, PlanError, ValueError) as exc:
-        result.status = "failed"
-        result.error = str(exc)
-        log.emit("derivation.failed", "failed", run_dir=str(run_dir), error=result.error)
+        else:
+            log.emit(
+                "derivation.failed",
+                "failed",
+                run_dir=str(run_dir),
+                error=result.error,
+                error_code=result.error_code,
+            )
+    except _SnapshotError as exc:
+        sync_failure(exc.code, str(exc))
+        try:
+            log.emit(
+                "derivation.failed",
+                "failed",
+                run_dir=str(run_dir),
+                error=result.error,
+                error_code=result.error_code,
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        code = "invalid_plan" if isinstance(exc, PlanError) else None
+        message = str(exc) or f"{type(exc).__name__} during checkpoint workflow"
+        candidate = deepcopy(state)
+        candidate["status"] = "failed"
+        candidate["error_code"] = code
+        candidate["error"] = message
+        try:
+            publish(candidate)
+        except _SnapshotError as snapshot_exc:
+            sync_failure(snapshot_exc.code, str(snapshot_exc))
+        if not result.error:
+            result.status = "failed"
+            result.error_code = code
+            result.error = message
+        try:
+            log.emit(
+                "derivation.failed",
+                "failed",
+                run_dir=str(run_dir),
+                error=result.error,
+                error_code=result.error_code,
+            )
+        except Exception:
+            pass
     finally:
-        result.accepted_steps = [
-            {
-                "step_id": item.id,
-                "goal": item.goal,
-                "content": accepted[item.id]["content"],
-                "audit": accepted[item.id]["audit"],
-                "attempt": accepted[item.id]["attempt"],
-            }
-            for item in step_by_id.values()
-            if item.id in accepted and "content" in accepted[item.id]
-        ]
-        (run_dir / "outcome.json").write_text(
-            json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        _write_markdown_reports(result)
+        result.accepted_steps = _aggregate_accepted(state["steps"], state["accepted"])
+        result.attempts = state["attempts"]
+        if result.status == "failed" and not result.error:
+            result.error = state.get("error", "Workflow failed.")
+            result.error_code = state.get("error_code")
+        try:
+            (run_dir / "outcome.json").write_text(
+                json.dumps(result.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            _write_markdown_reports(result)
+        except OSError as exc:
+            if not result.error:
+                result.error = f"Final diagnostic write failed: {exc}"
+                if result.status.startswith("completed_"):
+                    result.status = "failed"
+                    result.error_code = "diagnostic_write_failed"
     return result

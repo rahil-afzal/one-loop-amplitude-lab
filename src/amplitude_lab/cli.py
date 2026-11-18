@@ -9,13 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .assistant.client import GeminiClient
-from .assistant.config import GeminiConfig
-from .assistant.errors import (
-    AssistantConfigError,
-    AssistantRequestError,
-    AssistantUnavailableError,
-)
+from .assistant.errors import AssistantConfigError
 from .assistant.mock import mock_client
 from .physics import conventions
 from .physics.amplitude import assemble
@@ -40,13 +34,9 @@ from .workflows.verification import verify_final_answer
 def _assistant_from_name(name):
     if name is None:
         return None
-    if name == "gemini":
-        config = GeminiConfig.from_env(load_dotenv=True)
-        config.require_key()
-        return GeminiClient(config)
     if name.startswith("mock-"):
         return mock_client(name.removeprefix("mock-"))
-    raise ValueError(f"Unknown assistant {name!r}; use 'gemini' or 'mock-<proposal>'.")
+    raise ValueError(f"Unknown assistant {name!r}; use 'mock-<proposal>'.")
 
 
 def cmd_run(args):
@@ -64,20 +54,6 @@ def cmd_run(args):
     print(f"Overall status: {report['overall_status'].upper()}")
     print(f"report: {out_dir / 'run.md'}")
     return 0 if report["overall_status"] == "pass" else 1
-
-
-def cmd_smoke(_args):
-    try:
-        client = GeminiClient(GeminiConfig.from_env(load_dotenv=True))
-        print(client.smoke_test())
-    except (
-        AssistantConfigError,
-        AssistantRequestError,
-        AssistantUnavailableError,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    return 0
 
 
 def cmd_validate(args):
@@ -247,12 +223,9 @@ def main(argv=None):
 
     run = sub.add_parser("run", help="run deterministic checks and write a report")
     run.add_argument("--problem", default="yhg_dim4")
-    run.add_argument("--assistant", default=None, help="optional Gemini or mock assistant")
+    run.add_argument("--assistant", default=None, help="optional mock assistant")
     run.add_argument("--out-dir", default="runs/latest")
     run.set_defaults(func=cmd_run)
-
-    smoke = sub.add_parser("smoke", help="test Gemini API connectivity")
-    smoke.set_defaults(func=cmd_smoke)
 
     validate = sub.add_parser("validate", help="run selected deterministic checks")
     validate.add_argument("--problem", default="yhg_dim4")

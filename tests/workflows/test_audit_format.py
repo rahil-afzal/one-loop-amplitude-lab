@@ -81,3 +81,35 @@ def test_accept_closes_all_open_items():
     ledger.add_blocking(["a | eq | x | fix"], attempt=1)
     ledger.close_all()
     assert ledger.open_issues() == []
+
+
+def test_insert_substep_is_typed_and_duplicate_metadata_is_contradictory():
+    parsed = parse_audit(
+        'VERDICT: REJECT\nBLOCKING: missing | omitted factor | derive it\n'
+        'INVALIDATE: current\n'
+        'INSERT_SUBSTEP: {"id":"factor","goal":"Derive the missing factor",'
+        '"depends_on":["lagrangian"]}\n'
+    )
+    assert decide(parsed) == "REJECT"
+    assert parsed.insert_substep == {
+        "id": "factor",
+        "goal": "Derive the missing factor",
+        "depends_on": ["lagrangian"],
+    }
+
+    duplicate = parse_audit(
+        "VERDICT: REJECT\nBLOCKING: issue\nINVALIDATE: current\n"
+        "INVALIDATE: PLAN\n"
+    )
+    assert decide(duplicate) == "CONTRADICTORY"
+    assert "duplicate INVALIDATE field" in duplicate.format_errors
+
+
+def test_malformed_insertion_is_not_silently_discarded():
+    parsed = parse_audit(
+        'VERDICT: REJECT\nBLOCKING: missing prerequisite\n'
+        'INSERT_SUBSTEP: {"id":"factor","goal":"derive it","unexpected":true}\n'
+    )
+    assert parsed.insert_substep is None
+    assert decide(parsed) == "CONTRADICTORY"
+    assert parsed.format_errors

@@ -59,10 +59,7 @@ def _load_dotenv():
 def _timeout_from_env(default=DEFAULT_LLM_TIMEOUT, timeout=None):
     raw_timeout = timeout
     if raw_timeout is None:
-        raw_timeout = os.environ.get(
-            "LLM_TIMEOUT_SECONDS",
-            os.environ.get("GEMINI_TIMEOUT_SECONDS", str(default)),
-        )
+        raw_timeout = os.environ.get("LLM_TIMEOUT_SECONDS", str(default))
     try:
         timeout = float(raw_timeout)
     except ValueError as exc:
@@ -305,11 +302,7 @@ def llm_from_env(provider=None, model=None, temperature=0.2, timeout=None, use_d
         return OpenAICompatibleLLM.from_env(
             model=model, temperature=temperature, timeout=timeout, use_dotenv=False
         )
-    if selected == "gemini":
-        return GeminiLLM.from_env(
-            model=model, temperature=temperature, timeout=timeout, use_dotenv=False
-        )
-    raise LLMError(f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible' or 'gemini'.")
+    raise LLMError(f"Unsupported LLM_PROVIDER {selected!r}; use 'openai-compatible'.")
 
 
 def role_llm_from_env(role, default_model, temperature=0.2, timeout=None, use_dotenv=True):
@@ -321,126 +314,3 @@ def role_llm_from_env(role, default_model, temperature=0.2, timeout=None, use_do
         timeout=timeout,
         use_dotenv=use_dotenv,
     )
-
-
-def _response_reason(response):
-    reasons = []
-    prompt_feedback = getattr(response, "prompt_feedback", None)
-    block_reason = getattr(prompt_feedback, "block_reason", None)
-    if block_reason is not None:
-        label = getattr(block_reason, "name", None) or str(
-            getattr(block_reason, "value", block_reason)
-        )
-        if "unspecified" not in label.lower() and label not in ("0", ""):
-            reasons.append(f"prompt block reason: {label}")
-
-    for candidate in getattr(response, "candidates", None) or []:
-        finish_reason = getattr(candidate, "finish_reason", None)
-        if finish_reason is None:
-            continue
-        label = getattr(finish_reason, "name", None) or str(
-            getattr(finish_reason, "value", finish_reason)
-        )
-        if "unspecified" not in label.lower() and label not in ("0", ""):
-            reasons.append(f"candidate finish reason: {label}")
-    return "; ".join(reasons)
-
-
-class GeminiLLM:
-    """Thin wrapper around the google-genai client (pip install -e '.[gemini]').
-
-    The call pattern follows the google-genai docs, but it has only been exercised against a
-    stub here, not the live API. Check the model name against the current model list.
-    """
-
-    def __init__(self, api_key, model, temperature=0.7, timeout=120.0, stream=False):
-        if not api_key:
-            raise LLMError("GEMINI_API_KEY is not set (environment or .env)")
-        if not model:
-            raise LLMError("GEMINI_MODEL is not set; pick a model from the Gemini docs")
-        self._key = api_key
-        self.model = model
-        self.temperature = temperature
-        self.timeout = timeout
-        self.stream = stream
-        self.name = f"gemini:{model}"
-
-    @classmethod
-    def from_env(cls, model=None, temperature=0.7, timeout=None, use_dotenv=True):
-        if use_dotenv:
-            _load_dotenv()
-        timeout = _timeout_from_env(default=120.0, timeout=timeout)
-        return cls(
-            os.environ.get("GEMINI_API_KEY"),
-            model or os.environ.get("GEMINI_MODEL"),
-            temperature=temperature,
-            timeout=timeout,
-            stream=_bool_from_env("GEMINI_STREAM"),
-        )
-
-    def __repr__(self):
-        return f"GeminiLLM(model={self.model!r})"
-
-    def describe(self):
-        return {
-            "name": self.name,
-            "model": self.model,
-            "temperature": self.temperature,
-            "timeout_s": self.timeout,
-            "stream": self.stream,
-        }
-
-    def complete(self, system, messages):
-        return self.complete_stream(system, messages, lambda token: token)
-
-    def complete_stream(self, system, messages, on_token):
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError:
-            raise LLMError("google-genai is not installed: pip install -e '.[gemini]'") from None
-        try:
-            client = genai.Client(
-                api_key=self._key,
-                http_options=types.HttpOptions(timeout=int(self.timeout * 1000)),
-            )
-            contents = [
-                types.Content(
-                    role="user" if m["role"] == "user" else "model",
-                    parts=[types.Part(text=m["text"])],
-                )
-                for m in messages
-            ]
-            config = types.GenerateContentConfig(
-                system_instruction=system, temperature=self.temperature
-            )
-            if self.stream:
-                parts = []
-                response = client.models.generate_content_stream(
-                    model=self.model, contents=contents, config=config
-                )
-                for chunk in response:
-                    text_part = getattr(chunk, "text", None)
-                    if text_part:
-                        parts.append(text_part)
-                        on_token(text_part)
-                text = "".join(parts)
-            else:
-                response = client.models.generate_content(
-                    model=self.model, contents=contents, config=config
-                )
-                text = response.text
-        except Exception as exc:
-            # the message can echo request details, so scrub the key and drop the chain
-            raise LLMError(_redact(f"{type(exc).__name__}: {exc}", self._key)) from None
-        if not text or not text.strip():
-            reason = _response_reason(response)
-            detail = f" ({reason})" if reason else ""
-            raise LLMError(
-                "Gemini returned no text (empty response)"
-                + detail
-                + "; check model access, safety filtering and generation limits."
-            )
-        if not self.stream:
-            on_token(text)
-        return text

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import amplitude_lab.workflows.autonomous as autonomous
 from amplitude_lab.workflows.autonomous import (
     AUDIT_SYSTEM,
     DERIVATION_SYSTEM,
@@ -51,6 +52,26 @@ def plan(*rows):
     )
 
 
+def nested_plan(*rows):
+    return json.dumps(
+        {
+            "interpretation": "A nested checkpoint test.",
+            "lagrangian": "$L = \\frac12(\\partial\\phi)^2$",
+            "strategy": "Derive and audit each bounded substep.",
+            "assumptions": [],
+            "steps": [
+                {
+                    "id": step_id,
+                    "goal": parent_goal,
+                    "depends_on": parent_dependencies,
+                    "substeps": substeps,
+                }
+                for step_id, parent_goal, parent_dependencies, substeps in rows
+            ],
+        }
+    )
+
+
 def audit(verdict="ACCEPT", target="final", diagnostic="The equations are consistent."):
     return json.dumps({"verdict": verdict, "target_step_id": target, "diagnostic": diagnostic})
 
@@ -75,6 +96,490 @@ def test_plan_requires_a_valid_dependency_order():
         assert "earlier steps" in str(exc)
     else:
         raise AssertionError("forward dependency was accepted")
+
+
+def test_nested_plan_validates_child_schema_and_legacy_rows_remain_permissive():
+    valid = nested_plan(
+        (
+            "rules",
+            "Derive the rules",
+            [],
+            [
+                {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                {"id": "sign", "goal": "Fix the sign", "depends_on": ["lagrangian"]},
+            ],
+        )
+    )
+    steps = parse_plan(valid)
+    assert steps[0].explicit_substeps
+    assert [child.id for child in steps[0].substeps] == ["lagrangian", "sign"]
+    assert steps[0].substeps[1].depends_on == ("lagrangian",)
+
+    legacy = json.loads(plan(("rules", "derive rules", [])))
+    legacy["steps"][0]["unrelated_legacy_field"] = True
+    assert not parse_plan(json.dumps(legacy))[0].explicit_substeps
+
+    malformed = json.loads(valid)
+    malformed["steps"][0]["substeps"][1]["extra"] = "rejected"
+    try:
+        parse_plan(json.dumps(malformed))
+    except PlanError as exc:
+        assert "exact child schema" in str(exc)
+    else:
+        raise AssertionError("unknown nested fields were accepted")
+
+    malformed = json.loads(valid)
+    malformed["steps"][0]["substeps"][0]["depends_on"] = ["sign"]
+    try:
+        parse_plan(json.dumps(malformed))
+    except PlanError as exc:
+        assert "earlier substeps" in str(exc)
+    else:
+        raise AssertionError("a forward child dependency was accepted")
+
+
+def test_rejected_substep_retries_locally_and_consumes_dependencies_once(tmp_path):
+    task = Task("substep_retry", "Derive a simple scalar expression.")
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Derive the rule",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {
+                            "id": "factor",
+                            "goal": "Derive the finite factor",
+                            "depends_on": ["lagrangian"],
+                        },
+                    ],
+                )
+            ),
+            "Lagrangian checkpoint.",
+            "An incorrect factor.",
+            "The corrected factor.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            audit("REJECT", "current", "Re-derive the finite factor."),
+            audit("ACCEPT", "rules"),
+        ]
+    )
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, max_substep_retries=1
+    )
+    assert result.status == "completed_unverified"
+    assert len(derivation.calls) == 4
+    assert [item.substep_id for item in result.attempts] == [
+        "lagrangian",
+        "factor",
+        "factor",
+    ]
+    assert result.accepted_steps[0]["content"] == (
+        "Lagrangian checkpoint.\n\nThe corrected factor."
+    )
+    final_audit_prompt = json.loads(auditor.calls[-1][0]["text"])
+    assert "original_problem" not in final_audit_prompt
+    assert [item["substep_id"] for item in final_audit_prompt["accepted_checkpoints"]] == [
+        "lagrangian"
+    ]
+
+
+def test_valid_inserted_substep_gates_only_its_rejected_target(tmp_path):
+    task = Task("insert_substep", "Derive a scalar expression.")
+    events = []
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Derive the result",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {
+                            "id": "answer",
+                            "goal": "Derive the final expression",
+                            "depends_on": ["lagrangian"],
+                        },
+                    ],
+                )
+            ),
+            "Lagrangian checkpoint.",
+            "Incomplete answer.",
+            "Derivation of the omitted factor.",
+            "Corrected answer using the factor.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            (
+                "VERDICT: REJECT\n"
+                "BLOCKING: missing | omitted factor | derive it\n"
+                "INVALIDATE: current\n"
+                'INSERT_SUBSTEP: {"id":"factor","goal":"Derive the omitted factor",'
+                '"depends_on":["lagrangian"]}\n'
+            ),
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "rules"),
+        ]
+    )
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, on_event=events.append
+    )
+    assert result.status == "completed_unverified"
+    assert [attempt.substep_id for attempt in result.attempts] == [
+        "lagrangian",
+        "answer",
+        "factor",
+        "answer",
+    ]
+    answer = next(step for step in result.plan if step["id"] == "rules")
+    inserted = next(child for child in answer["substeps"] if child["id"] == "factor")
+    assert inserted["depends_on"] == ("lagrangian",)
+    update = next(event for event in events if event["type"] == "plan.updated")
+    assert update["reason"] == "substep_inserted"
+    assert any(child["id"] == "factor" for child in update["steps"][0]["substeps"])
+    outcome = json.loads((Path(result.run_dir) / "outcome.json").read_text())
+    assert "child_statuses" in outcome
+
+
+def test_child_invalidation_preserves_independent_sibling_checkpoints(tmp_path):
+    task = Task("child_invalidation", "Derive dependent scalar results.")
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Establish the rule set",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {
+                            "id": "sign",
+                            "goal": "Fix the interaction sign",
+                            "depends_on": ["lagrangian"],
+                        },
+                        {"id": "aux", "goal": "Derive an independent check"},
+                    ],
+                ),
+                (
+                    "final",
+                    "Derive the requested result",
+                    ["rules"],
+                    [{"id": "answer", "goal": "Derive the final expression"}],
+                ),
+            ),
+            "Lagrangian.",
+            "Independent auxiliary result.",
+            "Initial sign.",
+            "Initial final expression.",
+            "Corrected sign.",
+            "Recomputed final expression.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "rules"),
+            (
+                "VERDICT: REJECT\n"
+                "BLOCKING: sign | interaction sign | re-derive it\n"
+                "INVALIDATE: rules.sign\n"
+            ),
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "final"),
+        ]
+    )
+    result = run_autonomous_derivation(task, derivation, auditor, runs_dir=tmp_path)
+    assert result.status == "completed_unverified"
+    assert [attempt.substep_id for attempt in result.attempts].count("lagrangian") == 1
+    assert [attempt.substep_id for attempt in result.attempts].count("aux") == 1
+    assert [attempt.substep_id for attempt in result.attempts].count("sign") == 2
+    assert [attempt.substep_id for attempt in result.attempts].count("answer") == 2
+    assert result.backtracking[0].invalidated_steps == ["rules.sign", "final.answer"]
+    assert result.child_statuses["rules.aux"]["status"] == "accepted"
+
+
+def test_parent_target_from_nested_audit_retries_parent_prerequisite(tmp_path):
+    task = Task("parent_target", "Derive dependent scalar results.")
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Establish the rule set",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {
+                            "id": "sign",
+                            "goal": "Fix the interaction sign",
+                            "depends_on": ["lagrangian"],
+                        },
+                    ],
+                )
+            ),
+            "Initial Lagrangian.",
+            "Initial sign.",
+            "Corrected Lagrangian.",
+            "Corrected sign.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            (
+                "VERDICT: REJECT\n"
+                "BLOCKING: convention | sign | re-check the parent derivation\n"
+                "INVALIDATE: rules\n"
+            ),
+            audit("ACCEPT", "rules"),
+            audit("ACCEPT", "rules"),
+        ]
+    )
+
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, max_substep_retries=1
+    )
+
+    assert result.status == "completed_unverified"
+    assert [attempt.substep_id for attempt in result.attempts] == [
+        "lagrangian",
+        "sign",
+        "lagrangian",
+        "sign",
+    ]
+    assert result.backtracking[0].target_step_id == "rules"
+    assert result.backtracking[0].invalidated_steps == [
+        "rules.lagrangian",
+        "rules.sign",
+    ]
+
+
+def test_repeated_open_issue_does_not_trigger_plan_replacement(tmp_path):
+    task = Task("local_only_retry", "Derive a simple expression.")
+    derivation = ScriptedLLM(
+        [
+            plan(("final", "derive final expression", [])),
+            "First proposal.",
+            "Second proposal.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            "VERDICT: REJECT\nBLOCKING: sign | wrong sign | re-derive\nINVALIDATE: none\n",
+            (
+                "VERDICT: REJECT\nPREVIOUS: B1 STILL OPEN: still inconsistent\n"
+                "BLOCKING: B1 | sign | still wrong | re-derive\nINVALIDATE: none\n"
+            ),
+        ]
+    )
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, max_step_retries=1, max_replans=2
+    )
+    assert result.status == "retry_exhausted"
+    assert len(derivation.calls) == 3  # One planner call; no implicit replanning.
+    assert "Checkpoint 'final'/'main' exhausted" in result.error
+
+
+def test_explicit_rejected_plan_target_replans_once_and_preserves_accepted_child(tmp_path):
+    task = Task("explicit_replan", "Derive dependent scalar results.")
+    events = []
+    initial_plan = nested_plan(
+        (
+            "rules",
+            "Establish rules",
+            [],
+            [
+                {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                {"id": "factor", "goal": "Derive a factor", "depends_on": ["lagrangian"]},
+            ],
+        )
+    )
+    revised_plan = nested_plan(
+        (
+            "rules",
+            "Establish rules",
+            [],
+            [
+                {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                {
+                    "id": "factor",
+                    "goal": "Derive the corrected factor",
+                    "depends_on": ["lagrangian"],
+                },
+            ],
+        )
+    )
+    derivation = ScriptedLLM(
+        [
+            initial_plan,
+            "Lagrangian checkpoint.",
+            "Initial factor.",
+            revised_plan,
+            "Corrected factor.",
+        ]
+    )
+    auditor = ScriptedLLM(
+        [
+            audit("ACCEPT", "rules"),
+            (
+                "VERDICT: REJECT\nBLOCKING: factor | wrong factor | re-derive\n"
+                "INVALIDATE: PLAN\n"
+            ),
+            audit("ACCEPT", "rules"),
+        ]
+    )
+    result = run_autonomous_derivation(
+        task,
+        derivation,
+        auditor,
+        runs_dir=tmp_path,
+        max_replans=1,
+        max_substep_retries=1,
+        on_event=events.append,
+    )
+    assert result.status == "completed_unverified"
+    assert len(derivation.calls) == 5
+    assert [attempt.substep_id for attempt in result.attempts].count("lagrangian") == 1
+    assert [attempt.substep_id for attempt in result.attempts].count("factor") == 2
+    assert any(
+        event["type"] == "plan.updated" and event["reason"] == "replan"
+        for event in events
+    )
+    update = next(
+        event
+        for event in events
+        if event["type"] == "plan.updated" and event["reason"] == "replan"
+    )
+    assert update["steps"][0]["substeps"][1]["goal"] == "Derive the corrected factor"
+
+
+def test_snapshot_replace_failure_stops_before_derivation(monkeypatch, tmp_path):
+    task = Task(
+        "snapshot_failure",
+        "Derive a simple expression.",
+    )
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Derive the result",
+                    [],
+                    [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                )
+            ),
+            "Must not be requested.",
+        ]
+    )
+
+    def fail_replace(_source, _destination):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(autonomous.os, "replace", fail_replace)
+    result = run_autonomous_derivation(
+        task, derivation, ScriptedLLM([]), runs_dir=tmp_path
+    )
+    assert result.status == "failed"
+    assert result.error_code == "snapshot_write_failed"
+    assert len(derivation.calls) == 1
+    assert not (Path(result.run_dir) / "checkpoints.json").exists()
+    assert json.loads((Path(result.run_dir) / "outcome.json").read_text())["status"] == "failed"
+
+
+def test_failed_transition_snapshot_keeps_last_committed_graph(monkeypatch, tmp_path):
+    task = Task(
+        "snapshot_accept_failure",
+        "Derive a simple expression.",
+    )
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Derive the result",
+                    [],
+                    [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                )
+            ),
+            "Accepted output must not become committed.",
+            "Must not be requested after the failed commit.",
+        ]
+    )
+    auditor = ScriptedLLM([audit("ACCEPT", "rules")])
+    real_replace = autonomous.os.replace
+    replace_count = 0
+
+    def fail_acceptance_replace(source, destination):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 6:
+            raise OSError("injected checkpoint transition replace failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(autonomous.os, "replace", fail_acceptance_replace)
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path
+    )
+    assert result.status == "failed"
+    assert result.error_code == "snapshot_write_failed"
+    assert len(derivation.calls) == 2
+    assert len(auditor.calls) == 1
+    assert not result.accepted_steps
+    assert replace_count == 6
+    snapshot = json.loads((Path(result.run_dir) / "checkpoints.json").read_text())
+    assert snapshot["accepted"] == {}
+    assert snapshot["status"] == "running"
+
+
+def test_synthetic_main_id_collision_does_not_commit_an_insertion(tmp_path):
+    task = Task("insert_collision", "Derive a simple expression.")
+    derivation = ScriptedLLM(
+        [
+            plan(("final", "Establish the Lagrangian and derive the result", [])),
+            "Initial proposal.",
+            "Corrected proposal.",
+        ]
+    )
+    insertion = (
+        "VERDICT: REJECT\nBLOCKING: missing | derive an omitted prerequisite\n"
+        "INVALIDATE: current\n"
+        'INSERT_SUBSTEP: {"id":"main","goal":"Derive the missing prerequisite",'
+        '"depends_on":[]}\n'
+    )
+    auditor = ScriptedLLM([insertion, insertion, insertion, audit("ACCEPT", "final")])
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, max_step_retries=1
+    )
+    assert result.status == "completed_unverified"
+    assert "substeps" not in result.plan[0]
+    snapshot = json.loads((Path(result.run_dir) / "checkpoints.json").read_text())
+    assert snapshot["insertion_count"] == 0
+    assert snapshot["retry_counts"]["final.main"] == 1
+
+
+def test_unready_queue_terminates_with_scheduler_stalled(monkeypatch, tmp_path):
+    task = Task("scheduler_stall", "Derive a simple expression.")
+    derivation = ScriptedLLM([plan(("final", "Establish the Lagrangian", []))])
+    monkeypatch.setattr(
+        autonomous,
+        "_node_dependencies",
+        lambda _node, _nodes, _steps: ["missing-dependency"],
+    )
+    result = run_autonomous_derivation(
+        task, derivation, ScriptedLLM([]), runs_dir=tmp_path
+    )
+    assert result.status == "failed"
+    assert result.error_code == "scheduler_stalled"
+    assert len(derivation.calls) == 1
 
 
 def test_derivation_prompt_requests_checkable_intermediate_explanations():
@@ -134,7 +639,7 @@ def test_first_plan_step_must_establish_lagrangian(tmp_path):
     assert result.status == "failed"
     assert "first plan step must establish" in result.error
     assert "Derive Feynman rules" in result.error
-    assert (tmp_path / "plan_raw.md").exists()
+    assert (Path(result.run_dir) / "plan_raw.md").exists()
 
 
 def test_first_plan_step_accepts_action_phrasing(tmp_path):
@@ -365,10 +870,86 @@ def test_deterministic_failure_rejects_auditor_accepted_final_and_retries(tmp_pa
         [audit("ACCEPT", "final"), audit("ACCEPT", "final")],
         retries=1,
     )
-    assert result.status == "completed_verified"
+    assert result.status == "completed_verified", result.error
     assert result.attempts[0].status == "deterministic_rejection"
     assert result.attempts[0].deterministic_checks["passed"] is False
     assert result.attempts[1].deterministic_checks["passed"] is True
+
+
+def test_deterministic_rejection_recomputes_descendants_only(monkeypatch, tmp_path):
+    task = Task.load("phi4_dim4")
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Derive the result",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {
+                            "id": "formula",
+                            "goal": "Derive the final formula",
+                            "depends_on": ["lagrangian"],
+                        },
+                        {
+                            "id": "dependent",
+                            "goal": "Check the formula",
+                            "depends_on": ["formula"],
+                        },
+                        {"id": "aux", "goal": "Derive an independent check"},
+                    ],
+                )
+            ),
+            "Lagrangian checkpoint.",
+            "Independent auxiliary checkpoint.",
+            "Initial formula.\n```final\nA_loop = 1\n```",
+            "Check based on the initial formula.",
+            "Corrected formula.\n```final\nA_loop = 2\n```",
+            "Check based on the corrected formula.",
+        ]
+    )
+    auditor = ScriptedLLM([audit("ACCEPT", "rules") for _ in range(6)])
+    reports = iter(
+        [
+            {"passed": False, "failed_names": ["loop_value"]},
+            {"passed": True, "failed_names": []},
+        ]
+    )
+
+    class VerificationReport:
+        def __init__(self, value):
+            self.passed = value["passed"]
+            self.failed_names = value["failed_names"]
+
+        def to_dict(self):
+            return {"passed": self.passed, "checks": []}
+
+    monkeypatch.setattr(
+        autonomous,
+        "_hygiene_problem",
+        lambda _proposal, _is_last_step: "",
+    )
+    monkeypatch.setattr(
+        autonomous,
+        "verify_final_answer",
+        lambda _content: VerificationReport(next(reports)),
+    )
+
+    result = run_autonomous_derivation(
+        task,
+        derivation,
+        auditor,
+        runs_dir=tmp_path,
+        max_substep_retries=1,
+    )
+
+    assert result.status == "completed_verified"
+    assert [attempt.substep_id for attempt in result.attempts].count("formula") == 2
+    assert [attempt.substep_id for attempt in result.attempts].count("dependent") == 2
+    assert [attempt.substep_id for attempt in result.attempts].count("lagrangian") == 1
+    assert [attempt.substep_id for attempt in result.attempts].count("aux") == 1
+    assert result.child_statuses["rules.aux"]["status"] == "accepted"
 
 
 def test_stream_callback_failure_is_reported_and_run_is_persisted(tmp_path):

@@ -8,11 +8,12 @@ auditor. This module performs no physics checks.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
 _PREFIX = re.compile(
-    r"^(VERDICT|PREVIOUS|BLOCKING|MINOR|INVALIDATE)\s*:\s*(.*)$",
+    r"^(VERDICT|PREVIOUS|BLOCKING|MINOR|INVALIDATE|INSERT_SUBSTEP)\s*:\s*(.*)$",
     re.IGNORECASE,
 )
 _BULLET = re.compile(r"^(?:[-*+\u2022]\s+|\d+[.)]\s+)")
@@ -29,6 +30,8 @@ class ParsedAudit:
     blocking: list[str] = field(default_factory=list)
     minor: list[str] = field(default_factory=list)
     invalidate: str = "none"
+    insert_substep: dict | None = None
+    format_errors: list[str] = field(default_factory=list)
 
 
 def _is_none(text: str) -> bool:
@@ -39,6 +42,8 @@ def parse_audit(text: str) -> ParsedAudit:
     """Parse a line-based audit reply. Unknown lines continue the previous item."""
     parsed = ParsedAudit()
     section = None
+    invalidate_count = 0
+    insertion_count = 0
     for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
         line = raw_line.replace("**", "").replace("__", "").strip()
         line = _BULLET.sub("", line).strip()
@@ -53,7 +58,31 @@ def parse_audit(text: str) -> ParsedAudit:
                 word = value.split()[0].upper() if value.split() else ""
                 parsed.verdict = word if word in ("ACCEPT", "REJECT") else "MISSING"
             elif key == "INVALIDATE":
+                invalidate_count += 1
+                if invalidate_count > 1:
+                    parsed.format_errors.append("duplicate INVALIDATE field")
                 parsed.invalidate = "none" if _is_none(value) else value
+            elif key == "INSERT_SUBSTEP":
+                insertion_count += 1
+                if insertion_count > 1:
+                    parsed.format_errors.append("duplicate INSERT_SUBSTEP field")
+                try:
+                    insertion = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    insertion = None
+                if (
+                    not isinstance(insertion, dict)
+                    or set(insertion) - {"id", "goal", "depends_on"}
+                    or not isinstance(insertion.get("id"), str)
+                    or not isinstance(insertion.get("goal"), str)
+                    or (
+                        "depends_on" in insertion
+                        and not isinstance(insertion["depends_on"], list)
+                    )
+                ):
+                    parsed.format_errors.append("malformed INSERT_SUBSTEP object")
+                else:
+                    parsed.insert_substep = insertion
             elif key == "PREVIOUS" and not _is_none(value):
                 _add_previous(parsed, value)
             elif key == "BLOCKING" and not _is_none(value):
@@ -83,6 +112,8 @@ def _add_previous(parsed: ParsedAudit, value: str) -> None:
 
 def decide(parsed: ParsedAudit) -> str:
     """Decision table: ACCEPT, REJECT, or CONTRADICTORY (re-audit the same proposal)."""
+    if parsed.format_errors:
+        return "CONTRADICTORY"
     if parsed.verdict == "ACCEPT" and not parsed.blocking:
         return "ACCEPT"
     if parsed.verdict == "REJECT" and parsed.blocking:

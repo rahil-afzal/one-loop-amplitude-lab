@@ -16,8 +16,7 @@ Rules that keep the validation meaningful:
 3. **Read constants at call time** (`conventions.X`, not `from conventions import X`) so
    negative controls can reach them.
 4. **Physics core stays LLM-free.** `amplitude_lab.assistant` may import it, never the reverse.
-5. **Offline by default.** Tests must pass with no API key and no network. Real network
-   tests are marked `gemini` and opt-in.
+5. **Offline by default.** Tests must pass with no API key and no network.
 6. **No credentials in the repo.** Only `.env.example` placeholders.
 7. Do not widen the supported scope silently: update `LIMITATIONS` in `reporting.py`
    and `docs/ROADMAP.md` in the same change.

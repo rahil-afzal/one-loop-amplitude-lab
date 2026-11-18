@@ -20,15 +20,11 @@ The assistant is a *proposal generator*. It has no authority.
 
 `verified` means a finite-sample test passed. It is not a proof.
 
-## Credentials
+## Credentials and providers
 
-- `GEMINI_API_KEY` comes from the environment; a local `.env` is loaded only by the CLI
-  assistant commands, and tests are hermetic (the key and `.env` loading are disabled).
-- `GEMINI_TIMEOUT_SECONDS` configures the request timeout in seconds for both Gemini clients.
-- `GeminiConfig.__repr__` redacts the key; SDK exceptions are caught, the key is
-  replaced by `<REDACTED>`, messages are truncated, and the original exception is not
-  chained (`from None`).
-- No automatic retries; requests have an explicit timeout.
+Live derivation workflows use the OpenAI-compatible provider configured by
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `DERIVATION_MODEL`, and `AUDIT_MODEL`.
+Local `.env` loading is optional. API keys are not printed in reports or event streams.
 
 ## Adding a task
 
