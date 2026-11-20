@@ -21,11 +21,11 @@ from dataclasses import asdict, dataclass, field
 import mpmath as mp
 import sympy as sp
 
-from ..assistant.safe_expr import CandidateParseError, parse_expression
 from ..physics import conventions
 from ..physics.amplitude import assemble
 from ..physics.benchmarks import pure_phi4
 from ..physics.kinematics import Kinematics
+from ..safe_expr import CandidateParseError, parse_expression
 
 _FENCE = re.compile(r"```final\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 KEYS = ("A_tree", "A_loop", "beta_c4")
@@ -74,7 +74,7 @@ def extract_final_block(text: str) -> dict[str, str]:
     """Return ``{key: right-hand side}`` from the last ```final block (empty if absent)."""
     blocks = _FENCE.findall(text or "")
     found: dict[str, str] = {}
-    for line in (blocks[-1].splitlines() if blocks else []):
+    for line in blocks[-1].splitlines() if blocks else []:
         key, sep, value = line.partition("=")
         if sep and key.strip() in KEYS and value.strip():
             found[key.strip()] = value.strip()

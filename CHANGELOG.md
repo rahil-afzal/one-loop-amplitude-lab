@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Trimmed the product to checkpointed autonomous derivation, task prompt printing,
+  and deterministic saved-answer verification.
+- Removed the browser/SSE server, proposal assistant, feedback/legacy derivation
+  workflow, registered validation suite, and unrelated CLI commands.
+- Added SciPy as a runtime dependency of the retained bubble/amplitude verifier.
+
 ## 0.1.0
 
 - Two-scalar massless dim-4 one-loop amplitude `phi1 phi1 -> phi1 phi1` (`c4`, `c42`).

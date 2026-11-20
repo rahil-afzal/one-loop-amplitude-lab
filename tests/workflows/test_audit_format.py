@@ -85,8 +85,8 @@ def test_accept_closes_all_open_items():
 
 def test_insert_substep_is_typed_and_duplicate_metadata_is_contradictory():
     parsed = parse_audit(
-        'VERDICT: REJECT\nBLOCKING: missing | omitted factor | derive it\n'
-        'INVALIDATE: current\n'
+        "VERDICT: REJECT\nBLOCKING: missing | omitted factor | derive it\n"
+        "INVALIDATE: current\n"
         'INSERT_SUBSTEP: {"id":"factor","goal":"Derive the missing factor",'
         '"depends_on":["lagrangian"]}\n'
     )
@@ -98,8 +98,7 @@ def test_insert_substep_is_typed_and_duplicate_metadata_is_contradictory():
     }
 
     duplicate = parse_audit(
-        "VERDICT: REJECT\nBLOCKING: issue\nINVALIDATE: current\n"
-        "INVALIDATE: PLAN\n"
+        "VERDICT: REJECT\nBLOCKING: issue\nINVALIDATE: current\nINVALIDATE: PLAN\n"
     )
     assert decide(duplicate) == "CONTRADICTORY"
     assert "duplicate INVALIDATE field" in duplicate.format_errors
@@ -107,7 +106,7 @@ def test_insert_substep_is_typed_and_duplicate_metadata_is_contradictory():
 
 def test_malformed_insertion_is_not_silently_discarded():
     parsed = parse_audit(
-        'VERDICT: REJECT\nBLOCKING: missing prerequisite\n'
+        "VERDICT: REJECT\nBLOCKING: missing prerequisite\n"
         'INSERT_SUBSTEP: {"id":"factor","goal":"derive it","unexpected":true}\n'
     )
     assert parsed.insert_substep is None

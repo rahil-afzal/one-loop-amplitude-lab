@@ -75,10 +75,7 @@ def parse_audit(text: str) -> ParsedAudit:
                     or set(insertion) - {"id", "goal", "depends_on"}
                     or not isinstance(insertion.get("id"), str)
                     or not isinstance(insertion.get("goal"), str)
-                    or (
-                        "depends_on" in insertion
-                        and not isinstance(insertion["depends_on"], list)
-                    )
+                    or ("depends_on" in insertion and not isinstance(insertion["depends_on"], list))
                 ):
                     parsed.format_errors.append("malformed INSERT_SUBSTEP object")
                 else:
@@ -175,7 +172,9 @@ class IssueLedger:
             else:
                 issue.status = "OPEN"
                 issue.open_rounds += 1
-        unmentioned = [issue.harness_id for issue in self.open_issues() if issue.harness_id not in mentioned]
+        unmentioned = [
+            issue.harness_id for issue in self.open_issues() if issue.harness_id not in mentioned
+        ]
         for harness_id in unmentioned:
             self.issues[harness_id].open_rounds += 1
         return unmentioned

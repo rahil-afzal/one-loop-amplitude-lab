@@ -7,16 +7,17 @@ ruff check . ; ruff format .
 python -m pytest --cov
 ```
 
-Rules that keep the validation meaningful:
+Rules:
 
-1. **No check without evidence kind.** Register checks with `@register(name, evidence, description)`
-   and pick the weakest honest label.
-2. **Every new check needs a negative control** in `tests/physics/test_validation_suite.py`
-   (sabotage the physics, assert the check fails).
-3. **Read constants at call time** (`conventions.X`, not `from conventions import X`) so
-   negative controls can reach them.
-4. **Physics core stays LLM-free.** `amplitude_lab.assistant` may import it, never the reverse.
-5. **Offline by default.** Tests must pass with no API key and no network.
-6. **No credentials in the repo.** Only `.env.example` placeholders.
-7. Do not widen the supported scope silently: update `LIMITATIONS` in `reporting.py`
-   and `docs/ROADMAP.md` in the same change.
+1. **Offline by default.** Workflow tests use `ScriptedLLM`; they must pass with no API key
+   or network access.
+2. **Parser security is load-bearing.** Add unsafe-expression, resource-limit, and accepted-
+   expression coverage in `tests/test_safe_expr.py`.
+3. **The verifier remains repository-referenced.** It checks only the saved final block
+   against retained amplitude/physics implementations; document finite-sample limits.
+4. **Physics core stays LLM-free.** Workflow modules may import physics, but the reverse
+   dependency must remain absent.
+5. **No credentials in the repository.** Only `.env.example` placeholders.
+6. **Preserve the task resource.** Changes to task packaging or loader behavior require
+   wheel/task smoke coverage.
+7. **Run the retained checks:** targeted workflow/physics tests, full pytest, and Ruff.

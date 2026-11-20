@@ -3,7 +3,7 @@ import math
 import pytest
 
 from amplitude_lab.physics import conventions
-from amplitude_lab.physics.amplitude import assemble, forward_one_loop_imag
+from amplitude_lab.physics.amplitude import assemble
 from amplitude_lab.physics.kinematics import PERMUTATIONS, Kinematics
 
 
@@ -45,12 +45,6 @@ def test_c42_enters_only_through_loop(problem):
     assert a.tree == b.tree
     ratio = a.one_loop / b.one_loop
     assert ratio == pytest.approx(problem.coupling_sq / problem.c4**2)
-
-
-def test_forward_imaginary_part_is_s_independent(problem):
-    expected = problem.coupling_sq / (32.0 * math.pi)
-    for s in (0.1, 1.0, 50.0):
-        assert forward_one_loop_imag(problem, s) == pytest.approx(expected, rel=1e-12)
 
 
 def test_result_to_dict_is_json_ready(problem):

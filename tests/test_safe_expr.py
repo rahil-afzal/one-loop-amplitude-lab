@@ -2,7 +2,7 @@
 
 import pytest
 
-from amplitude_lab.assistant.safe_expr import CandidateParseError, evaluate, parse_expression
+from amplitude_lab.safe_expr import CandidateParseError, evaluate, parse_expression
 
 
 @pytest.mark.parametrize(

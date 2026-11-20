@@ -5,9 +5,8 @@
 The function is analytic in the s-plane cut along s > 0. The physical sheet is the
 upper-half-plane boundary, so for real s > 0:  B = 2 - ln(s/mu2) + i*pi.
 
-Note on the massless Feynman-parameter integral: x(1-x) factorizes out of the log, so
-quadrature mostly validates the constant 2 and the branch handling. The nontrivial,
-independent evidence comes from the momentum-space, unitarity and dispersion checks.
+The analytic implementation supplies the retained amplitude assembly and final-answer
+verifier. The numerical quadrature and continuation routines provide same-module checks.
 """
 
 from __future__ import annotations

@@ -47,7 +47,7 @@ def plan(*rows):
                     "depends_on": dependencies,
                 }
                 for index, (step_id, goal, dependencies) in enumerate(rows)
-            ]
+            ],
         }
     )
 
@@ -430,10 +430,7 @@ def test_explicit_rejected_plan_target_replans_once_and_preserves_accepted_child
     auditor = ScriptedLLM(
         [
             audit("ACCEPT", "rules"),
-            (
-                "VERDICT: REJECT\nBLOCKING: factor | wrong factor | re-derive\n"
-                "INVALIDATE: PLAN\n"
-            ),
+            ("VERDICT: REJECT\nBLOCKING: factor | wrong factor | re-derive\nINVALIDATE: PLAN\n"),
             audit("ACCEPT", "rules"),
         ]
     )
@@ -450,14 +447,9 @@ def test_explicit_rejected_plan_target_replans_once_and_preserves_accepted_child
     assert len(derivation.calls) == 5
     assert [attempt.substep_id for attempt in result.attempts].count("lagrangian") == 1
     assert [attempt.substep_id for attempt in result.attempts].count("factor") == 2
-    assert any(
-        event["type"] == "plan.updated" and event["reason"] == "replan"
-        for event in events
-    )
+    assert any(event["type"] == "plan.updated" and event["reason"] == "replan" for event in events)
     update = next(
-        event
-        for event in events
-        if event["type"] == "plan.updated" and event["reason"] == "replan"
+        event for event in events if event["type"] == "plan.updated" and event["reason"] == "replan"
     )
     assert update["steps"][0]["substeps"][1]["goal"] == "Derive the corrected factor"
 
@@ -485,9 +477,7 @@ def test_snapshot_replace_failure_stops_before_derivation(monkeypatch, tmp_path)
         raise OSError("injected replace failure")
 
     monkeypatch.setattr(autonomous.os, "replace", fail_replace)
-    result = run_autonomous_derivation(
-        task, derivation, ScriptedLLM([]), runs_dir=tmp_path
-    )
+    result = run_autonomous_derivation(task, derivation, ScriptedLLM([]), runs_dir=tmp_path)
     assert result.status == "failed"
     assert result.error_code == "snapshot_write_failed"
     assert len(derivation.calls) == 1
@@ -526,9 +516,7 @@ def test_failed_transition_snapshot_keeps_last_committed_graph(monkeypatch, tmp_
         return real_replace(source, destination)
 
     monkeypatch.setattr(autonomous.os, "replace", fail_acceptance_replace)
-    result = run_autonomous_derivation(
-        task, derivation, auditor, runs_dir=tmp_path
-    )
+    result = run_autonomous_derivation(task, derivation, auditor, runs_dir=tmp_path)
     assert result.status == "failed"
     assert result.error_code == "snapshot_write_failed"
     assert len(derivation.calls) == 2
@@ -574,9 +562,7 @@ def test_unready_queue_terminates_with_scheduler_stalled(monkeypatch, tmp_path):
         "_node_dependencies",
         lambda _node, _nodes, _steps: ["missing-dependency"],
     )
-    result = run_autonomous_derivation(
-        task, derivation, ScriptedLLM([]), runs_dir=tmp_path
-    )
+    result = run_autonomous_derivation(task, derivation, ScriptedLLM([]), runs_dir=tmp_path)
     assert result.status == "failed"
     assert result.error_code == "scheduler_stalled"
     assert len(derivation.calls) == 1
@@ -644,7 +630,9 @@ def test_first_plan_step_must_establish_lagrangian(tmp_path):
 
 def test_first_plan_step_accepts_action_phrasing(tmp_path):
     payload = json.loads(plan(("rules", "derive Feynman rules", [])))
-    payload["steps"][0]["goal"] = "Write the action S = int(1/2 (dphi)^2 - c4/4! phi^4) and fix conventions"
+    payload["steps"][0]["goal"] = (
+        "Write the action S = int(1/2 (dphi)^2 - c4/4! phi^4) and fix conventions"
+    )
     result = execute(tmp_path, [json.dumps(payload)], [])
     assert "first plan step must establish" not in (result.error or "")
 
@@ -748,9 +736,7 @@ def test_step_prompts_reuse_compact_context_and_only_relevant_checkpoints(tmp_pa
         ]
     )
 
-    result = run_autonomous_derivation(
-        task, derivation_llm, audit_llm, runs_dir=tmp_path
-    )
+    result = run_autonomous_derivation(task, derivation_llm, audit_llm, runs_dir=tmp_path)
 
     assert result.status == "completed_unverified"
     first_step_prompt = json.loads(derivation_llm.calls[1][0]["text"])
@@ -761,9 +747,7 @@ def test_step_prompts_reuse_compact_context_and_only_relevant_checkpoints(tmp_pa
 
     final_audit_prompt = json.loads(audit_llm.calls[2][0]["text"])
     assert "UNIQUE_RAW_REQUIREMENT" not in audit_llm.calls[2][0]["text"]
-    assert [row["step_id"] for row in final_audit_prompt["accepted_checkpoints"]] == [
-        "rules"
-    ]
+    assert [row["step_id"] for row in final_audit_prompt["accepted_checkpoints"]] == ["rules"]
 
 
 def test_rejection_returns_diagnostic_and_derivation_corrects_it(tmp_path):
@@ -1006,3 +990,503 @@ def test_provider_stream_failure_preserves_partial_attempt(tmp_path):
     assert "provider stream disconnected" in result.error
     assert result.attempts[0].status == "generation_failed"
     assert result.attempts[0].proposal == "partial derivation"
+
+
+def test_reports_publish_partial_children_under_their_parent_before_event(monkeypatch, tmp_path):
+    task = Task("partial_report", "Derive dependent scalar results.")
+    derivation = ScriptedLLM(
+        [
+            nested_plan(
+                (
+                    "rules",
+                    "Establish the rule set",
+                    [],
+                    [
+                        {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                        {"id": "shared", "goal": "Derive the shared rule"},
+                    ],
+                ),
+                (
+                    "checks",
+                    "Derive independent checks",
+                    [],
+                    [
+                        {"id": "shared", "goal": "Derive the distinct shared check"},
+                        {"id": "pending", "goal": "Derive the pending check"},
+                    ],
+                ),
+            ),
+            "RULES_LAGRANGIAN_ACCEPTED",
+            "RULES_SHARED_ACCEPTED",
+            "CHECKS_SHARED_ACCEPTED",
+            "CHECKS_PENDING",
+        ]
+    )
+    auditor = ScriptedLLM([audit("ACCEPT", "current")] * 4)
+    original_writer = autonomous._write_markdown_reports
+    written_results = []
+
+    def record_writer(result, accepted_children=None, rendered=None):
+        written_results.append(result)
+        return original_writer(result, accepted_children, rendered)
+
+    monkeypatch.setattr(autonomous, "_write_markdown_reports", record_writer)
+    callback_views = []
+
+    def on_event(event):
+        if (
+            event["type"] == "substep.accepted"
+            and event.get("step_id") == "checks"
+            and event.get("substep_id") == "shared"
+        ):
+            current = written_results[-1]
+            assert current is written_results[0]
+            assert [row["step_id"] for row in current.accepted_steps] == ["rules"]
+            assert current.child_statuses["checks.shared"]["status"] == "accepted"
+            assert current.child_statuses["checks.pending"]["status"] == "pending"
+            reports = {
+                name: (Path(current.run_dir) / name).read_text(encoding="utf-8")
+                for name in ("result.md", "steps.md", "response.md")
+            }
+            callback_views.append(reports)
+
+    result = run_autonomous_derivation(
+        task, derivation, auditor, runs_dir=tmp_path, on_event=on_event
+    )
+    assert result.status == "completed_unverified"
+    assert len(callback_views) == 1
+    for name, report in callback_views[0].items():
+        assert "CHECKS_SHARED_ACCEPTED" in report, name
+        assert "CHECKS_PENDING" not in report, name
+    result_report = callback_views[0]["result.md"]
+    assert "RULES_LAGRANGIAN_ACCEPTED" in result_report
+    assert "RULES_SHARED_ACCEPTED" in result_report
+    parent_heading = "checks: Derive independent checks (parent not accepted)"
+    assert result_report.index(parent_heading) < result_report.index("CHECKS_SHARED_ACCEPTED")
+    accepted_section = result_report.split("## Accepted derivation", 1)[1].split(
+        "## Attempts and audit history", 1
+    )[0]
+    assert accepted_section.count("CHECKS_SHARED_ACCEPTED") == 1
+    assert "Derive the pending check" not in accepted_section
+    steps_report = callback_views[0]["steps.md"]
+    assert "- Status: **accepted**" in steps_report
+    assert "Status: **pending**" in steps_report
+
+
+def test_rejection_report_is_current_before_callback_and_keeps_retry_history(monkeypatch, tmp_path):
+    task = Task("rejection_report", "Derive a simple scalar expression.")
+    events = []
+    written_results = []
+    original_writer = autonomous._write_markdown_reports
+
+    def capture_writer(result, accepted_children=None, rendered=None):
+        written_results.append(result)
+        return original_writer(result, accepted_children, rendered)
+
+    monkeypatch.setattr(autonomous, "_write_markdown_reports", capture_writer)
+
+    def on_event(event):
+        events.append(event)
+        if event["type"] not in ("step.rejected", "step.accepted"):
+            return
+        current = written_results[-1]
+        result_report = (Path(current.run_dir) / "result.md").read_text(encoding="utf-8")
+        steps_report = (Path(current.run_dir) / "steps.md").read_text(encoding="utf-8")
+        if event["type"] == "step.rejected":
+            assert current.attempts[-1].status == "rejected"
+            assert "REJECTED_PROPOSAL_UNIQUE" in result_report
+            assert "REJECTION_DIAGNOSTIC_UNIQUE" in result_report
+            assert "REJECTED_PROPOSAL_UNIQUE" in steps_report
+            assert "REJECTION_DIAGNOSTIC_UNIQUE" in steps_report
+        else:
+            assert [attempt.status for attempt in current.attempts] == [
+                "rejected",
+                "accepted",
+            ]
+            assert "REJECTED_PROPOSAL_UNIQUE" in result_report
+            assert "ACCEPTED_RETRY_UNIQUE" in result_report
+            assert "REJECTION_DIAGNOSTIC_UNIQUE" in result_report
+
+    result = run_autonomous_derivation(
+        task,
+        ScriptedLLM(
+            [
+                nested_plan(
+                    (
+                        "rules",
+                        "Establish the rule",
+                        [],
+                        [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                    )
+                ),
+                "REJECTED_PROPOSAL_UNIQUE",
+                "ACCEPTED_RETRY_UNIQUE",
+            ]
+        ),
+        ScriptedLLM(
+            [
+                audit("REJECT", "current", "REJECTION_DIAGNOSTIC_UNIQUE"),
+                audit("ACCEPT", "rules"),
+            ]
+        ),
+        runs_dir=tmp_path,
+        max_substep_retries=1,
+        on_event=on_event,
+    )
+    rejected = next(event for event in events if event["type"] == "step.rejected")
+    assert rejected["diagnostic"] == "REJECTION_DIAGNOSTIC_UNIQUE"
+    result_report = (Path(result.run_dir) / "result.md").read_text(encoding="utf-8")
+    steps_report = (Path(result.run_dir) / "steps.md").read_text(encoding="utf-8")
+    attempts = result_report.split("## Attempts and audit history", 1)[1]
+    assert attempts.index("REJECTED_PROPOSAL_UNIQUE") < attempts.index("ACCEPTED_RETRY_UNIQUE")
+    assert "REJECTION_DIAGNOSTIC_UNIQUE" in result_report
+    assert "REJECTED_PROPOSAL_UNIQUE" in steps_report
+    assert "REJECTION_DIAGNOSTIC_UNIQUE" in steps_report
+    assert "ACCEPTED_RETRY_UNIQUE" in steps_report
+    assert [attempt.status for attempt in result.attempts] == ["rejected", "accepted"]
+    assert result.status == "completed_unverified"
+
+
+def test_provider_failure_report_is_current_before_failed_event(monkeypatch, tmp_path):
+    class BrokenStream:
+        name = "broken-provider"
+        stream = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete_stream(self, _system, _messages, on_token):
+            self.calls += 1
+            if self.calls == 1:
+                return nested_plan(
+                    (
+                        "rules",
+                        "Establish the rule",
+                        [],
+                        [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                    )
+                )
+            on_token("PARTIAL_PROVIDER_PROPOSAL_UNIQUE")
+            raise LLMError("PROVIDER_DIAGNOSTIC_UNIQUE")
+
+    result_ref = []
+    original_writer = autonomous._write_markdown_reports
+
+    def capture_result(result, accepted_children=None, rendered=None):
+        result_ref.append(result)
+        return original_writer(result, accepted_children, rendered)
+
+    monkeypatch.setattr(autonomous, "_write_markdown_reports", capture_result)
+
+    def on_event(event):
+        if event["type"] != "derivation.failed":
+            return
+        current = result_ref[-1]
+        assert current.status == "failed"
+        assert "PROVIDER_DIAGNOSTIC_UNIQUE" in current.error
+        for name in ("result.md", "steps.md", "response.md"):
+            report = (Path(current.run_dir) / name).read_text(encoding="utf-8")
+            assert "Status: **failed**" in report, name
+            assert "PROVIDER_DIAGNOSTIC_UNIQUE" in report, name
+        for name in ("result.md", "steps.md"):
+            report = (Path(current.run_dir) / name).read_text(encoding="utf-8")
+            assert "PARTIAL_PROVIDER_PROPOSAL_UNIQUE" in report, name
+
+    result = run_autonomous_derivation(
+        Task("provider_report", "Derive a simple expression."),
+        BrokenStream(),
+        ScriptedLLM([]),
+        runs_dir=tmp_path,
+        on_event=on_event,
+    )
+    assert result.status == "failed"
+    assert result.attempts[0].status == "generation_failed"
+    outcome = json.loads((Path(result.run_dir) / "outcome.json").read_text())
+    assert outcome["status"] == result.status
+    assert outcome["error"] == result.error
+    snapshot = json.loads((Path(result.run_dir) / "checkpoints.json").read_text())
+    assert snapshot["attempts"][0]["status"] == "generation_failed"
+
+
+def test_replaced_checkpoint_error_does_not_publish_attempted_candidate(monkeypatch, tmp_path):
+    task = Task("post_replace_report", "Derive a simple expression.")
+    original_checkpoint = autonomous._atomic_checkpoint
+    callback_states = []
+
+    def replace_then_fail(path, payload):
+        original_checkpoint(path, payload)
+        if payload["accepted"]:
+            raise autonomous._SnapshotError(
+                "injected post-replace durability failure",
+                "snapshot_durability_uncertain",
+                replaced=True,
+            )
+
+    monkeypatch.setattr(autonomous, "_atomic_checkpoint", replace_then_fail)
+
+    def on_event(event):
+        if event["type"] == "derivation.failed":
+            callback_states.append(
+                (
+                    event,
+                    (Path(event["run_dir"]) / "result.md").read_text(encoding="utf-8"),
+                )
+            )
+
+    result = run_autonomous_derivation(
+        task,
+        ScriptedLLM(
+            [
+                nested_plan(
+                    (
+                        "rules",
+                        "Establish the rule",
+                        [],
+                        [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                    )
+                ),
+                "UNCOMMITTED_ACCEPTED_CONTENT",
+            ]
+        ),
+        ScriptedLLM([audit("ACCEPT", "rules")]),
+        runs_dir=tmp_path,
+        on_event=on_event,
+    )
+    assert result.status == "failed"
+    assert result.error_code == "snapshot_durability_uncertain"
+    assert not result.accepted_steps
+    assert len(callback_states) == 1
+    accepted_section = (
+        callback_states[0][1]
+        .split("## Accepted derivation", 1)[1]
+        .split("## Attempts and audit history", 1)[0]
+    )
+    assert "UNCOMMITTED_ACCEPTED_CONTENT" not in accepted_section
+
+
+def test_report_write_failure_is_isolated_and_retried_at_finalization(
+    monkeypatch, caplog, tmp_path
+):
+    task = Task("report_write_failure", "Derive a simple expression.")
+    original_write_text = Path.write_text
+    original_writer = autonomous._write_markdown_reports
+    report_writes = []
+    checkpoint_observations = []
+    checkpoint_at_failure = []
+    workflow_observations = []
+    failed_write_position = None
+    failed_once = False
+
+    def flaky_write_text(path, data, *args, **kwargs):
+        nonlocal failed_once, failed_write_position
+        if path.name in ("result.md", "steps.md", "response.md"):
+            report_writes.append(path.name)
+            if (
+                path.name == "result.md"
+                and "IO_FAILURE_ACCEPTED_UNIQUE" in data
+                and not failed_once
+            ):
+                failed_once = True
+                failed_write_position = len(report_writes) - 1
+                checkpoint = path.parent / "checkpoints.json"
+                checkpoint_at_failure.append(checkpoint.read_bytes())
+                raise OSError("injected Markdown write failure")
+        return original_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+
+    def observe_writer(result, accepted_children=None, rendered=None):
+        run_dir = Path(result.run_dir)
+        if rendered and "IO_FAILURE_ACCEPTED_UNIQUE" in rendered.get("result.md", ""):
+            checkpoint_path = run_dir / "checkpoints.json"
+            before_checkpoint = checkpoint_path.read_bytes()
+            before_result = (
+                result.status,
+                result.error,
+                result.error_code,
+                list(result.attempts),
+                list(result.accepted_steps),
+            )
+            succeeded = original_writer(result, accepted_children, rendered)
+            checkpoint_observations.append((before_checkpoint, checkpoint_path.read_bytes()))
+            workflow_observations.append(
+                (
+                    before_result,
+                    (
+                        result.status,
+                        result.error,
+                        result.error_code,
+                        list(result.attempts),
+                        list(result.accepted_steps),
+                    ),
+                )
+            )
+            return succeeded
+        return original_writer(result, accepted_children, rendered)
+
+    monkeypatch.setattr(autonomous, "_write_markdown_reports", observe_writer)
+    callback_results = []
+
+    def on_event(event):
+        if event["type"] == "substep.accepted":
+            callback_results.append(event)
+
+    result = run_autonomous_derivation(
+        task,
+        ScriptedLLM(
+            [
+                nested_plan(
+                    (
+                        "rules",
+                        "Establish the rule",
+                        [],
+                        [{"id": "lagrangian", "goal": "Establish the Lagrangian"}],
+                    )
+                ),
+                "IO_FAILURE_ACCEPTED_UNIQUE",
+            ]
+        ),
+        ScriptedLLM([audit("ACCEPT", "rules")]),
+        runs_dir=tmp_path,
+        on_event=on_event,
+    )
+    assert result.status == "completed_unverified"
+    assert failed_once
+    assert callback_results
+    assert "result.md" in report_writes
+    assert "steps.md" in report_writes
+    assert "response.md" in report_writes
+    assert report_writes[failed_write_position : failed_write_position + 3] == [
+        "result.md",
+        "steps.md",
+        "response.md",
+    ]
+    assert "Could not refresh autonomous report" in caplog.text
+    assert "IO_FAILURE_ACCEPTED_UNIQUE" in (Path(result.run_dir) / "result.md").read_text(
+        encoding="utf-8"
+    )
+    assert result.error == ""
+    assert result.error_code is None
+    assert len(result.attempts) == 1
+    assert result.accepted_steps[0]["content"] == "IO_FAILURE_ACCEPTED_UNIQUE"
+    snapshot = json.loads((Path(result.run_dir) / "checkpoints.json").read_text())
+    assert snapshot["accepted"]["rules.lagrangian"]["content"] == "IO_FAILURE_ACCEPTED_UNIQUE"
+    assert checkpoint_at_failure
+    assert checkpoint_observations
+    assert all(before == after for before, after in checkpoint_observations)
+    assert all(before == after for before, after in workflow_observations)
+
+
+def test_report_refresh_coalesces_tokens_and_queue_only_checkpoint(monkeypatch, tmp_path):
+    task = Task("report_coalescing", "Derive a simple scalar expression.")
+    original_writer = autonomous._write_markdown_reports
+    original_checkpoint = autonomous._atomic_checkpoint
+    writer_calls = []
+    previous_payload = None
+    pending_queue_only_count = None
+    queue_only_transitions = []
+
+    def observe_writer(result, accepted_children=None, rendered=None):
+        writer_calls.append(rendered)
+        return original_writer(result, accepted_children, rendered)
+
+    def observe_checkpoint(path, payload):
+        nonlocal previous_payload, pending_queue_only_count
+        normalized_payload = json.loads(json.dumps(payload))
+        if pending_queue_only_count is not None:
+            assert len(writer_calls) == pending_queue_only_count
+            pending_queue_only_count = None
+        if previous_payload is not None:
+            previous_without_queue = {
+                key: value for key, value in previous_payload.items() if key != "queue"
+            }
+            current_without_queue = {
+                key: value for key, value in normalized_payload.items() if key != "queue"
+            }
+            if (
+                previous_payload["queue"] != normalized_payload["queue"]
+                and previous_without_queue == current_without_queue
+            ):
+                queue_only_transitions.append(normalized_payload["queue"])
+                pending_queue_only_count = len(writer_calls)
+        previous_payload = normalized_payload
+        return original_checkpoint(path, payload)
+
+    monkeypatch.setattr(autonomous, "_write_markdown_reports", observe_writer)
+    monkeypatch.setattr(autonomous, "_atomic_checkpoint", observe_checkpoint)
+    token_writer_counts = []
+    accepted_writer_count = []
+    visible_writer_count = []
+
+    def on_event(event):
+        if event["type"] == "token":
+            token_writer_counts.append(
+                (
+                    event.get("state"),
+                    event.get("step_id"),
+                    event.get("substep_id"),
+                    len(writer_calls),
+                )
+            )
+        elif event["type"] == "substep.accepted" and event.get("substep_id") == "lagrangian":
+            accepted_writer_count.append(len(writer_calls))
+        elif event["type"] == "step.generating" and event.get("substep_id") == "sign":
+            visible_writer_count.append(len(writer_calls))
+
+    result = run_autonomous_derivation(
+        task,
+        ScriptedLLM(
+            [
+                nested_plan(
+                    (
+                        "rules",
+                        "Establish the rules",
+                        [],
+                        [
+                            {"id": "lagrangian", "goal": "Establish the Lagrangian"},
+                            {
+                                "id": "sign",
+                                "goal": "Fix the interaction sign",
+                                "depends_on": ["lagrangian"],
+                            },
+                        ],
+                    )
+                ),
+                "LAGRANGIAN_TOKEN_STREAM_CONTENT",
+                "SIGN_TOKEN_STREAM_CONTENT",
+            ]
+        ),
+        ScriptedLLM([audit("ACCEPT", "current"), audit("ACCEPT", "current")]),
+        runs_dir=tmp_path,
+        on_event=on_event,
+    )
+    assert result.status == "completed_unverified"
+    assert queue_only_transitions
+    assert accepted_writer_count and visible_writer_count
+    assert visible_writer_count[0] > accepted_writer_count[0]
+    sign_tokens = [
+        row[3] for row in token_writer_counts if row[:3] == ("generating", "rules", "sign")
+    ]
+    assert len(sign_tokens) > 1
+    assert len(set(sign_tokens)) == 1
+    assert pending_queue_only_count is None
+
+
+def test_report_writer_renders_when_pre_rendered_content_is_omitted(tmp_path):
+    from amplitude_lab.workflows.autonomous import (
+        AutonomousResult,
+        _write_markdown_reports,
+    )
+
+    result = AutonomousResult(
+        task="report_writer",
+        status="running",
+        run_dir=str(tmp_path),
+        derivation_model="scripted",
+        audit_model="scripted",
+    )
+
+    assert _write_markdown_reports(result)
+    assert (tmp_path / "result.md").exists()
+    assert (tmp_path / "steps.md").exists()
+    assert (tmp_path / "response.md").exists()

@@ -3,8 +3,7 @@
     A_tree   = c4                                   (one contact diagram)
     A_1loop  = (c4^2 + c42^2)/(32 pi^2) [B(s) + B(t) + B(u)]
 
-All constants come from ``conventions`` and are read at call time so the validation
-suite can be run against deliberately broken conventions (negative controls).
+The assembled result supplies the retained deterministic final-answer verifier.
 """
 
 from __future__ import annotations
@@ -72,13 +71,3 @@ def assemble(problem: ProblemSpec, kin: Kinematics) -> AmplitudeResult:
             "scheme": problem.scheme,
         },
     )
-
-
-def forward_one_loop_imag(problem: ProblemSpec, s: float) -> float:
-    """Imaginary part of the ASSEMBLED one-loop amplitude at near-forward kinematics.
-
-    Evaluated through ``assemble`` (not a closed-form shortcut), so the optical-theorem
-    check genuinely exercises the loop code. The real part diverges as t -> 0 and is
-    never returned.
-    """
-    return assemble(problem, Kinematics.forward(s)).one_loop.imag

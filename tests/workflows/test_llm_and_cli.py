@@ -340,5 +340,3 @@ def test_compatible_provider_rejects_truncated_nonempty_response(monkeypatch):
         OpenAICompatibleLLM("key", "provider/model").complete(
             "system", [{"role": "user", "text": "prompt"}]
         )
-
-

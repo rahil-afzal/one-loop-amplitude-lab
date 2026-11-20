@@ -1,9 +1,7 @@
 """Safe parsing and evaluation of LLM-proposed formulas.
 
 LLM text is NEVER executed as Python. It is parsed with ``ast`` and converted node by
-node into a SymPy expression through a strict whitelist. Rejected: attribute access,
-subscripts, imports, calls to anything but whitelisted math functions, lambdas,
-comprehensions, strings, complex literals, symbolic or large exponents, oversized input.
+node into a SymPy expression through a strict whitelist.
 """
 
 from __future__ import annotations
@@ -20,13 +18,13 @@ MAX_LENGTH = 500
 MAX_NODES = 200
 MAX_EXPONENT = 8
 MAX_CONSTANT = 1e6
-MAX_NUMERIC_DECADES = 50  # any purely numeric power must stay below 10**50
+MAX_NUMERIC_DECADES = 50
 
 S = sp.Symbol("s", complex=True)
 MU2 = sp.Symbol("mu2", positive=True)
 
 _NAMES = {"s": S, "mu2": MU2, "pi": sp.pi, "I": sp.I}
-_EXTRA_NAMES: ContextVar[dict] = ContextVar("extra_names", default={})
+_EXTRA_NAMES: ContextVar[dict | None] = ContextVar("extra_names", default=None)
 _FUNCTIONS = {"log": sp.log, "ln": sp.log, "sqrt": sp.sqrt, "exp": sp.exp}
 _BINOPS = {
     ast.Add: operator.add,
@@ -44,7 +42,6 @@ class CandidateParseError(ValueError):
 def _convert(node: ast.AST) -> sp.Expr:
     if isinstance(node, ast.Expression):
         return _convert(node.body)
-
     if isinstance(node, ast.Constant):
         value = node.value
         if isinstance(value, bool) or not isinstance(value, int | float):
@@ -52,16 +49,13 @@ def _convert(node: ast.AST) -> sp.Expr:
         if abs(value) > MAX_CONSTANT:
             raise CandidateParseError("Numeric constant is too large.")
         return sp.sympify(value)
-
     if isinstance(node, ast.Name):
-        names = {**_NAMES, **_EXTRA_NAMES.get()}
+        names = {**_NAMES, **(_EXTRA_NAMES.get() or {})}
         if node.id not in names:
             raise CandidateParseError(f"Disallowed name: {node.id!r}.")
         return names[node.id]
-
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
         return _UNARY[type(node.op)](_convert(node.operand))
-
     if isinstance(node, ast.BinOp):
         if type(node.op) in _BINOPS:
             return _BINOPS[type(node.op)](_convert(node.left), _convert(node.right))
@@ -73,7 +67,6 @@ def _convert(node: ast.AST) -> sp.Expr:
                 raise CandidateParseError(f"Exponent magnitude must be <= {MAX_EXPONENT}.")
             base = _convert(node.left)
             if not base.free_symbols:
-                # Nested numeric powers like ((10**6)**8)**8... must not build huge integers.
                 magnitude = abs(complex(base))
                 if magnitude > 0.0 and (
                     abs(float(exponent)) * abs(math.log10(magnitude)) > MAX_NUMERIC_DECADES
@@ -81,19 +74,17 @@ def _convert(node: ast.AST) -> sp.Expr:
                     raise CandidateParseError("Numeric power is too large.")
             return base**exponent
         raise CandidateParseError(f"Disallowed operator: {type(node.op).__name__}.")
-
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCTIONS:
             raise CandidateParseError("Only whitelisted math functions may be called.")
         if node.keywords or len(node.args) != 1:
             raise CandidateParseError("Functions take exactly one positional argument.")
         return _FUNCTIONS[node.func.id](_convert(node.args[0]))
-
     raise CandidateParseError(f"Disallowed syntax: {type(node).__name__}.")
 
 
 def extract_expression(text: str) -> str:
-    """Strip Markdown fences, a leading 'B(s;mu2) =', and normalize '^' and unicode minus."""
+    """Strip Markdown fences, a leading equality, and normalize power/unicode syntax."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = "\n".join(
@@ -105,7 +96,7 @@ def extract_expression(text: str) -> str:
 
 
 def parse_expression(text: str, extra_names: tuple[str, ...] = ()) -> sp.Expr:
-    """Parse a proposal; ``extra_names`` adds plain complex symbols (e.g. ``t``, ``c4``)."""
+    """Parse a proposal; ``extra_names`` adds plain complex symbols."""
     token = _EXTRA_NAMES.set({name: sp.Symbol(name, complex=True) for name in extra_names})
     try:
         return _parse_expression(text)
@@ -132,7 +123,7 @@ def _parse_expression(text: str) -> sp.Expr:
 
 
 def evaluate(expr: sp.Expr, s: complex, mu2: float, precision: int = 30) -> complex:
-    """Evaluate with mpmath (principal branches). Raises on any numerical failure."""
+    """Evaluate with mpmath. Numerical or conversion failures raise ArithmeticError."""
     try:
         function = sp.lambdify((S, MU2), expr, modules="mpmath")
         with mp.workdps(precision):

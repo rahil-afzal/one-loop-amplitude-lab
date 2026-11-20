@@ -29,10 +29,10 @@ jobs:
           ruff format --check .
       - name: Offline tests (no API key, no network)
         run: python -m pytest --cov --cov-report=term-missing
-      - name: Benchmark CLI
-        run: python -m amplitude_lab run --out-dir reports
-      - uses: actions/upload-artifact@v4
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        with:
-          name: validation-reports
-          path: reports/
+      - name: Retained CLI smoke
+        shell: bash
+        run: |
+          python -m amplitude_lab --help
+          python -m amplitude_lab --version
+          python -m amplitude_lab task --task phi4_dim4
+          python -m amplitude_lab derive --task phi4_dim4 --help

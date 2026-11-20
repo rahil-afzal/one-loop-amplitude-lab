@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -16,6 +17,8 @@ from typing import Callable
 from .audit_format import IssueLedger, ParsedAudit, decide, parse_audit
 from .llm import LLMError
 from .verification import verify_final_answer
+
+_LOGGER = logging.getLogger(__name__)
 
 PLAN_SYSTEM = (
     "You are a research-planning assistant for quantum field theory. Read only the supplied "
@@ -82,7 +85,8 @@ AUDIT_SYSTEM = (
     "goal and deliverables against the accepted checkpoints. You may recompute key quantities "
     "privately to verify them, but never supply a corrected formula; point to the exact equation, "
     "say what is inconsistent, and say what to re-derive. Classify each issue as BLOCKING (changes "
-    "a result, a sign, a factor of i, a coefficient, a power of mu, violates the stated goal or the "
+    "a result, a sign, a factor of i, a coefficient, or a power of mu, "
+    "violating the stated goal or the "
     "notation contract, or contains an unresolved retraction) or MINOR (presentation or optional "
     "improvement). Do not raise issues that belong to other steps; if an accepted checkpoint is "
     "wrong, report it separately with its step ID. You are given your previous issues: first "
@@ -91,7 +95,8 @@ AUDIT_SYSTEM = (
     "blocking issues. Output exactly:\n"
     "VERDICT: ACCEPT|REJECT\n"
     "PREVIOUS: <id>: RESOLVED|OPEN: <evidence>   (one per line, or 'none')\n"
-    "BLOCKING: <id> | <equation/location> | <what is inconsistent> | <what to re-derive>   (one per line, or 'none')\n"
+    "BLOCKING: <id> | <equation/location> | <what is inconsistent> | "
+    "<what to re-derive>   (one per line, or 'none')\n"
     "MINOR: <id> | <note>   (one per line, or 'none')\n"
     "INVALIDATE: <current|accepted step id|parent step id|none>\n"
     "When auditing a nested substep, use 'current' for a local rejection. Naming "
@@ -105,9 +110,7 @@ _STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _JSON_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 _FINAL_BLOCK = re.compile(r"```final\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _CHECKPOINT_BLOCK = re.compile(r"```checkpoint\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_RETRACTION = re.compile(
-    r"\b(wait,|let me redo|let me recompute|actually,)", re.IGNORECASE
-)
+_RETRACTION = re.compile(r"\b(wait,|let me redo|let me recompute|actually,)", re.IGNORECASE)
 _BLOCKING_ID = re.compile(r"(?m)^BLOCKING:\s*([^|\s]+)\s*\|", re.IGNORECASE)
 _PREVIOUS_LINE = re.compile(r"(?im)^PREVIOUS:\s*([^:\s]+)\s*:\s*(RESOLVED|STILL OPEN|OPEN)\b")
 _MINOR_LINE = re.compile(r"(?im)^MINOR:\s*(?!none\s*$)(.+)$")
@@ -245,7 +248,11 @@ def parse_plan(text: str) -> list[DerivationStep]:
                     or child_id in child_ids
                 ):
                     raise PlanError(f"invalid or duplicate substep ID {child_id!r} in {step_id!r}")
-                if not isinstance(child_goal, str) or not child_goal.strip() or len(child_goal) > 500:
+                if (
+                    not isinstance(child_goal, str)
+                    or not child_goal.strip()
+                    or len(child_goal) > 500
+                ):
                     raise PlanError(
                         f"substep {child_id!r} must have a non-empty goal of at most 500 chars"
                     )
@@ -298,8 +305,7 @@ def _plan_overview(text: str) -> tuple[str, str, str, list[str]]:
         not isinstance(assumptions, list)
         or len(assumptions) > 20
         or any(
-            not isinstance(item, str) or not item.strip() or len(item) > 500
-            for item in assumptions
+            not isinstance(item, str) or not item.strip() or len(item) > 500 for item in assumptions
         )
     ):
         raise PlanError("plan assumptions must be up to 20 non-empty strings of at most 500 chars")
@@ -369,7 +375,11 @@ def _structured_audit_response(
     if verdict == "ACCEPT" and blocking:
         return "UNCERTAIN", current_id, "Audit accepted the step while reporting blocking issues."
     if verdict == "REJECT" and not blocking:
-        return "UNCERTAIN", current_id, "Audit rejected the step without reporting a blocking issue."
+        return (
+            "UNCERTAIN",
+            current_id,
+            ("Audit rejected the step without reporting a blocking issue."),
+        )
 
     previous_open = re.findall(r"(?m)^PREVIOUS:\s*(.+)$", text)
     previous_open = [
@@ -399,7 +409,14 @@ def _format_audit_response(text: str) -> str:
     if isinstance(target, str):
         sections.append(f"**Review target:** `{target}`")
     if isinstance(diagnostic, str):
-        sections.extend(["", "**Auditor's explanation:**", "", diagnostic or "No explanation supplied."])
+        sections.extend(
+            [
+                "",
+                "**Auditor's explanation:**",
+                "",
+                diagnostic or "No explanation supplied.",
+            ]
+        )
     if not sections:
         return text
     return "\n".join(sections)
@@ -507,7 +524,9 @@ def _ancestors(step_id: str, step_by_id: dict[str, DerivationStep]) -> set[str]:
     return ancestors
 
 
-def _render_report(result: AutonomousResult) -> str:
+def _render_report(result: AutonomousResult, accepted_children: dict | None = None) -> str:
+    accepted_children = accepted_children or {}
+    accepted_parents = {row["step_id"] for row in result.accepted_steps}
     sections = [
         f"# Autonomous derivation: {result.task}",
         "",
@@ -559,6 +578,30 @@ def _render_report(result: AutonomousResult) -> str:
                     "",
                 ]
             )
+    for step in result.plan:
+        if step["id"] in accepted_parents:
+            continue
+        partial_children = [
+            (child, accepted_children[f"{step['id']}.{child['id']}"])
+            for child in step.get("substeps", [])
+            if f"{step['id']}.{child['id']}" in accepted_children
+        ]
+        if not partial_children:
+            continue
+        sections.extend([f"### {step['id']}: {step['goal']} (parent not accepted)", ""])
+        for child, accepted_child in partial_children:
+            sections.extend(
+                [
+                    f"#### {step['id']}.{child['id']}: {child['goal']}",
+                    "",
+                    accepted_child["content"],
+                    "",
+                    "Child audit:",
+                    "",
+                    _format_audit_response(accepted_child["audit"]),
+                    "",
+                ]
+            )
     sections.extend(["## Attempts and audit history", ""])
     for attempt in result.attempts:
         title_id = attempt.step_id
@@ -595,8 +638,7 @@ def _render_report(result: AutonomousResult) -> str:
         sections.extend(["", "## Substep progress", ""])
         for node_id, child in result.child_statuses.items():
             sections.append(
-                f"- `{node_id}`: **{child['status']}** "
-                f"({child['attempts']} attempt(s))"
+                f"- `{node_id}`: **{child['status']}** ({child['attempts']} attempt(s))"
             )
     sections.extend(["", "## Deterministic verification", ""])
     sections.append(json.dumps(result.verification, indent=2, ensure_ascii=False))
@@ -608,7 +650,8 @@ def _render_report(result: AutonomousResult) -> str:
     return "\n".join(sections)
 
 
-def _render_steps_report(result: AutonomousResult) -> str:
+def _render_steps_report(result: AutonomousResult, accepted_children: dict | None = None) -> str:
+    accepted_children = accepted_children or {}
     accepted = {row["step_id"]: row for row in result.accepted_steps}
     attempts_by_step: dict[str, list[StepAttempt]] = {}
     for attempt in result.attempts:
@@ -660,14 +703,16 @@ def _render_steps_report(result: AutonomousResult) -> str:
                     "",
                 ]
             )
-            accepted_child = next(
-                (
-                    value
-                    for value in (row or {}).get("substeps", [])
-                    if value["substep_id"] == child["id"]
-                ),
-                None,
-            )
+            accepted_child = accepted_children.get(qualified)
+            if accepted_child is None:
+                accepted_child = next(
+                    (
+                        value
+                        for value in (row or {}).get("substeps", [])
+                        if value["substep_id"] == child["id"]
+                    ),
+                    None,
+                )
             if accepted_child:
                 sections.extend(
                     [
@@ -725,11 +770,15 @@ def _render_steps_report(result: AutonomousResult) -> str:
         sections.append("No backtracking was recorded.")
     sections.extend(["", "## Deterministic verification", ""])
     sections.append(json.dumps(result.verification, indent=2, ensure_ascii=False))
+    if result.error:
+        sections.extend(["", "## Workflow error", "", result.error])
     sections.append("")
     return "\n".join(sections)
 
 
-def _render_response(result: AutonomousResult) -> str:
+def _render_response(result: AutonomousResult, accepted_children: dict | None = None) -> str:
+    accepted_children = accepted_children or {}
+    accepted_parents = {row["step_id"] for row in result.accepted_steps}
     sections = [
         f"# Derivation response: {result.task}",
         "",
@@ -754,7 +803,20 @@ def _render_response(result: AutonomousResult) -> str:
                     f"#### {child['substep_id']}: {child['goal']}\n\n{child['content']}\n"
                 )
     else:
-        sections.append("No derivation steps were accepted.")
+        if not accepted_children:
+            sections.append("No derivation steps were accepted.")
+    for step in result.plan:
+        if step["id"] in accepted_parents:
+            continue
+        partial_children = [
+            (child, accepted_children[f"{step['id']}.{child['id']}"])
+            for child in step.get("substeps", [])
+            if f"{step['id']}.{child['id']}" in accepted_children
+        ]
+        if partial_children:
+            sections.append(f"### {step['goal']} (parent not accepted)\n")
+            for child, accepted_child in partial_children:
+                sections.append(f"#### {child['goal']}\n\n{accepted_child['content']}\n")
     sections.extend(["## Result", "", result.final_amplitude or "No final result was accepted."])
     if result.verification:
         passed = result.verification.get("passed")
@@ -766,11 +828,53 @@ def _render_response(result: AutonomousResult) -> str:
     return "\n".join(sections)
 
 
-def _write_markdown_reports(result: AutonomousResult) -> None:
+def _render_markdown_reports(
+    result: AutonomousResult, accepted_children: dict | None = None
+) -> tuple[dict[str, str], bool]:
+    renderers = (
+        ("result.md", _render_report),
+        ("steps.md", _render_steps_report),
+        ("response.md", _render_response),
+    )
+    contents = {}
+    succeeded = True
+    for filename, renderer in renderers:
+        try:
+            contents[filename] = renderer(result, accepted_children)
+        except Exception:
+            succeeded = False
+            _LOGGER.warning(
+                "Could not render autonomous report %s",
+                Path(result.run_dir) / filename,
+                exc_info=True,
+            )
+    return contents, succeeded
+
+
+def _write_markdown_reports(
+    result: AutonomousResult,
+    accepted_children: dict | None = None,
+    rendered: dict[str, str] | None = None,
+) -> bool:
     run_dir = Path(result.run_dir)
-    (run_dir / "result.md").write_text(_render_report(result), encoding="utf-8")
-    (run_dir / "steps.md").write_text(_render_steps_report(result), encoding="utf-8")
-    (run_dir / "response.md").write_text(_render_response(result), encoding="utf-8")
+    if rendered is None:
+        rendered, render_succeeded = _render_markdown_reports(result, accepted_children)
+    else:
+        render_succeeded = len(rendered) == 3
+    succeeded = render_succeeded
+    for filename in ("result.md", "steps.md", "response.md"):
+        if filename not in rendered:
+            continue
+        try:
+            (run_dir / filename).write_text(rendered[filename], encoding="utf-8")
+        except Exception:
+            succeeded = False
+            _LOGGER.warning(
+                "Could not refresh autonomous report %s",
+                run_dir / filename,
+                exc_info=True,
+            )
+    return succeeded
 
 
 class _SnapshotError(OSError):
@@ -812,7 +916,10 @@ def _step_nodes(steps: list[DerivationStep]) -> list[dict]:
             )
     return result
 
-def _node_dependencies(node: dict, nodes_by_key: dict[str, dict], steps: list[DerivationStep]) -> list[str]:
+
+def _node_dependencies(
+    node: dict, nodes_by_key: dict[str, dict], steps: list[DerivationStep]
+) -> list[str]:
     dependencies = list(node["local_dependencies"])
     for parent_id in node["parent_dependencies"]:
         dependencies.extend(
@@ -1054,8 +1161,7 @@ def _validate_insertion(
             local_ancestors.add(ancestor)
             pending.extend(by_id[ancestor].depends_on)
     if any(
-        dependency not in local_ancestors
-        or f"{step.id}.{dependency}" not in state["accepted"]
+        dependency not in local_ancestors or f"{step.id}.{dependency}" not in state["accepted"]
         for dependency in dependencies
     ):
         return "INSERT_SUBSTEP dependencies must be accepted local ancestors of the target."
@@ -1111,6 +1217,7 @@ def run_autonomous_derivation(
         derivation_model=getattr(derivation_llm, "name", "unknown"),
         audit_model=getattr(audit_llm, "name", "unknown"),
     )
+    last_written_reports = None
     (run_dir / "prompt.md").write_text(task.derivation_prompt, encoding="utf-8")
     (run_dir / "meta.json").write_text(
         json.dumps(
@@ -1119,16 +1226,6 @@ def run_autonomous_derivation(
                 "workflow": "autonomous_stepwise_audit",
                 "derivation_model": result.derivation_model,
                 "audit_model": result.audit_model,
-                "derivation_client": (
-                    derivation_llm.describe()
-                    if hasattr(derivation_llm, "describe")
-                    else {"name": result.derivation_model}
-                ),
-                "audit_client": (
-                    audit_llm.describe()
-                    if hasattr(audit_llm, "describe")
-                    else {"name": result.audit_model}
-                ),
                 "derivation_client": (
                     derivation_llm.describe()
                     if hasattr(derivation_llm, "describe")
@@ -1198,8 +1295,7 @@ def run_autonomous_derivation(
                     "substep_id": node["substep_id"] or "main",
                     "status": candidate["node_statuses"].get(node["key"], "pending"),
                     "attempts": sum(
-                        item.step_id == node["step_id"]
-                        and item.substep_id == node["substep_id"]
+                        item.step_id == node["step_id"] and item.substep_id == node["substep_id"]
                         for item in candidate["attempts"]
                     ),
                 }
@@ -1227,17 +1323,24 @@ def run_autonomous_derivation(
             note for ledger in candidate["ledgers"].values() for note in ledger.minor
         ]
 
+    def refresh_reports(force: bool = False) -> None:
+        nonlocal last_written_reports
+        accepted_children = deepcopy(state["accepted"])
+        rendered, render_succeeded = _render_markdown_reports(result, accepted_children)
+        projection = tuple(
+            rendered.get(filename) for filename in ("result.md", "steps.md", "response.md")
+        )
+        if not force and projection == last_written_reports:
+            return
+        if _write_markdown_reports(result, accepted_children, rendered):
+            last_written_reports = projection
+
     def publish(candidate: dict) -> None:
         nonlocal state
-        try:
-            _atomic_checkpoint(initial_snapshot, _snapshot_state(candidate))
-        except _SnapshotError as exc:
-            if exc.replaced:
-                state = candidate
-                _apply_public_state(candidate)
-            raise
+        _atomic_checkpoint(initial_snapshot, _snapshot_state(candidate))
         state = candidate
         _apply_public_state(candidate)
+        refresh_reports()
 
     def graph(candidate: dict):
         nodes = _step_nodes(candidate["steps"])
@@ -1267,9 +1370,7 @@ def run_autonomous_derivation(
                 key for key in candidate["queue"] if key not in newly_ready
             ]
         else:
-            candidate["queue"].extend(
-                key for key in newly_ready if key not in candidate["queue"]
-            )
+            candidate["queue"].extend(key for key in newly_ready if key not in candidate["queue"])
 
     def retry_limit(node: dict) -> int:
         return max_substep_retries if node["substep_id"] is not None else max_step_retries
@@ -1304,7 +1405,9 @@ def run_autonomous_derivation(
             return "current", ""
         if raw.casefold() == "plan":
             if verdict != "REJECT" or parsed.insert_substep:
-                return "invalid", "PLAN invalidation is only valid with REJECT and without insertion."
+                return "invalid", (
+                    "PLAN invalidation is only valid with REJECT and without insertion."
+                )
             return "plan", ""
         if raw == node["step_id"]:
             if node["substep_id"] is not None and verdict == "REJECT":
@@ -1317,7 +1420,8 @@ def run_autonomous_derivation(
             allowed = parent_ancestors(node["step_id"], candidate["steps"])
             if raw in allowed and all(
                 f"{raw}.{child.id}" in candidate["accepted"]
-                for step in candidate["steps"] if step.id == raw
+                for step in candidate["steps"]
+                if step.id == raw
                 for child in step.substeps
             ):
                 if verdict != "REJECT" or parsed.insert_substep:
@@ -1339,7 +1443,8 @@ def run_autonomous_derivation(
                 "step_id": by_key[item["key"]]["step_id"],
                 **(
                     {"substep_id": by_key[item["key"]]["substep_id"]}
-                    if by_key[item["key"]]["substep_id"] else {}
+                    if by_key[item["key"]]["substep_id"]
+                    else {}
                 ),
                 "goal": by_key[item["key"]]["goal"],
                 "content": candidate["accepted"][item["key"]]["content"],
@@ -1397,7 +1502,6 @@ def run_autonomous_derivation(
             json.dumps([_step_dict(step) for step in steps], indent=2), encoding="utf-8"
         )
         publish(deepcopy(state))
-        _write_markdown_reports(result)
         log.emit(
             "plan.ready",
             "generating",
@@ -1410,14 +1514,13 @@ def run_autonomous_derivation(
         )
         while state["status"] == "running":
             unfinished = [
-                key for key, status in state["node_statuses"].items()
+                key
+                for key, status in state["node_statuses"].items()
                 if status not in ("accepted", "blocked")
             ]
             if not unfinished:
                 if task.name == "phi4_dim4":
-                    content = "\n\n".join(
-                        row["content"] for row in result.accepted_steps
-                    )
+                    content = "\n\n".join(row["content"] for row in result.accepted_steps)
                     log.emit("verification.started", "verifying")
                     report = verify_final_answer(content)
                     checks = report.to_dict()
@@ -1441,7 +1544,9 @@ def run_autonomous_derivation(
                             )
                             if last_attempt is not None:
                                 candidate["attempts"][last_attempt].deterministic_checks = checks
-                        last_content = result.accepted_steps[-1]["content"] if result.accepted_steps else ""
+                        last_content = (
+                            result.accepted_steps[-1]["content"] if result.accepted_steps else ""
+                        )
                         matches = _FINAL_BLOCK.findall(last_content)
                         candidate["final_amplitude"] = matches[-1] if matches else last_content
                         publish(candidate)
@@ -1458,7 +1563,8 @@ def run_autonomous_derivation(
                     failed_key = final_owners[-1] if final_owners else nodes_now[-1]["key"]
                     failed_node = by_key_now[failed_key]
                     attempt_index = next(
-                        index for index in range(len(candidate["attempts"]) - 1, -1, -1)
+                        index
+                        for index in range(len(candidate["attempts"]) - 1, -1, -1)
                         if candidate["attempts"][index].step_id == failed_node["step_id"]
                         and candidate["attempts"][index].substep_id == failed_node["substep_id"]
                     )
@@ -1472,8 +1578,7 @@ def run_autonomous_derivation(
                         changed = False
                         for item in nodes_now:
                             if item["key"] not in affected and any(
-                                dependency in affected
-                                for dependency in deps_now[item["key"]]
+                                dependency in affected for dependency in deps_now[item["key"]]
                             ):
                                 affected.add(item["key"])
                                 changed = True
@@ -1483,33 +1588,27 @@ def run_autonomous_derivation(
                     exhausted = [
                         item
                         for item in ordered_affected
-                        if candidate["retry_counts"].get(item, 0)
-                        >= retry_limit(by_key_now[item])
+                        if candidate["retry_counts"].get(item, 0) >= retry_limit(by_key_now[item])
                     ]
                     if exhausted:
                         for item in ordered_affected:
                             candidate["accepted"].pop(item, None)
                             candidate["node_statuses"][item] = "pending"
-                        _exhaust_node(
-                            candidate, failed_key, nodes_now, deps_now, diagnostic
-                        )
+                        _exhaust_node(candidate, failed_key, nodes_now, deps_now, diagnostic)
                         publish(candidate)
                         log.emit("verification.finished", "verifying", passed=False, checks=checks)
                         break
                     for item in ordered_affected:
                         candidate["accepted"].pop(item, None)
                         candidate["node_statuses"][item] = "pending"
-                        candidate["retry_counts"][item] = (
-                            candidate["retry_counts"].get(item, 0) + 1
-                        )
+                        candidate["retry_counts"][item] = candidate["retry_counts"].get(item, 0) + 1
                         candidate["feedback"][item] = diagnostic
                     candidate["queue"] = [failed_key] + [
                         item for item in candidate["queue"] if item not in affected
                     ]
                     candidate["verification"] = verification
                     invalidated = [
-                        _display_node_key(item, candidate["steps"])
-                        for item in ordered_affected
+                        _display_node_key(item, candidate["steps"]) for item in ordered_affected
                     ]
                     candidate["backtracking"].append(
                         Backtrack(
@@ -1548,8 +1647,7 @@ def run_autonomous_derivation(
                 candidate["status"] = "failed"
                 candidate["error_code"] = "scheduler_stalled"
                 candidate["error"] = (
-                    "Checkpoint scheduler stalled with unfinished nodes: "
-                    + ", ".join(unfinished)
+                    "Checkpoint scheduler stalled with unfinished nodes: " + ", ".join(unfinished)
                 )
                 publish(candidate)
                 break
@@ -1557,7 +1655,9 @@ def run_autonomous_derivation(
             key = state["queue"][0]
             nodes, by_key, dependency_map = graph(state)
             node = by_key.get(key)
-            if node is None or any(dependency not in state["accepted"] for dependency in dependency_map[key]):
+            if node is None or any(
+                dependency not in state["accepted"] for dependency in dependency_map[key]
+            ):
                 candidate = deepcopy(state)
                 candidate["queue"] = [item for item in candidate["queue"] if item != key]
                 publish(candidate)
@@ -1568,11 +1668,16 @@ def run_autonomous_derivation(
             publish(candidate)
             state_node = by_key[key]
             step = next(item for item in state["steps"] if item.id == state_node["step_id"])
-            child = next(item for item in step.substeps if item.id == (state_node["substep_id"] or "main"))
-            attempt_number = sum(
-                attempt.step_id == node["step_id"] and attempt.substep_id == node["substep_id"]
-                for attempt in state["attempts"]
-            ) + 1
+            child = next(
+                item for item in step.substeps if item.id == (state_node["substep_id"] or "main")
+            )
+            attempt_number = (
+                sum(
+                    attempt.step_id == node["step_id"] and attempt.substep_id == node["substep_id"]
+                    for attempt in state["attempts"]
+                )
+                + 1
+            )
             dependency_rows = accepted_context(node, state)
             prompt = {
                 "problem_context": {
@@ -1775,9 +1880,7 @@ def run_autonomous_derivation(
                 raw_audits.append(audit_response)
                 parsed = _audit_payload(audit_response, key)
                 decision = decide(parsed)
-                target_kind, target_error = authorized_target(
-                    parsed, parsed.verdict, node, state
-                )
+                target_kind, target_error = authorized_target(parsed, parsed.verdict, node, state)
                 if decision != "CONTRADICTORY" and target_kind != "invalid":
                     if parsed.insert_substep and target_kind != "current":
                         target_error = "Insertion cannot be combined with invalidation."
@@ -1799,8 +1902,10 @@ def run_autonomous_derivation(
                     chosen = parsed
                     chosen_target = target_kind
                     break
-                target_diagnostic = target_error or "; ".join(parsed.format_errors) or (
-                    "Audit response was contradictory or malformed."
+                target_diagnostic = (
+                    target_error
+                    or "; ".join(parsed.format_errors)
+                    or ("Audit response was contradictory or malformed.")
                 )
                 log.emit(
                     "step.audit_retried",
@@ -1877,7 +1982,9 @@ def run_autonomous_derivation(
                     new_steps = parse_plan(new_plan_text)
                     new_first_goal = new_steps[0].substeps[0].goal
                     if not re.search(r"lagrangian|action|\bL\s*=", new_first_goal, re.IGNORECASE):
-                        raise PlanError("first plan substep must establish and justify the Lagrangian")
+                        raise PlanError(
+                            "first plan substep must establish and justify the Lagrangian"
+                        )
                     old_steps = candidate["steps"]
                     old_nodes = _step_nodes(old_steps)
                     old_keys = {item["key"] for item in old_nodes}
@@ -1891,7 +1998,8 @@ def run_autonomous_derivation(
                     old_signatures = _node_signatures(candidate["steps"])
                     new_signatures = _node_signatures(new_steps)
                     kept = {
-                        item for item in new_keys
+                        item
+                        for item in new_keys
                         if item in candidate["accepted"]
                         and old_signatures.get(item) == new_signatures.get(item)
                     }
@@ -1909,11 +2017,13 @@ def run_autonomous_derivation(
                                 changed = True
                     invalidated = old_keys - kept
                     replacements = {
-                        item for item in (old_keys & new_keys) - kept
+                        item
+                        for item in (old_keys & new_keys) - kept
                         if item in candidate["accepted"] or item == key
                     }
                     exhausted_replacements = [
-                        item for item in replacements
+                        item
+                        for item in replacements
                         if candidate["retry_counts"].get(item, 0)
                         >= retry_limit(next(node for node in old_nodes if node["key"] == item))
                     ]
@@ -1935,19 +2045,15 @@ def run_autonomous_derivation(
                         publish(candidate)
                         break
                     for item in replacements:
-                        candidate["retry_counts"][item] = (
-                            candidate["retry_counts"].get(item, 0) + 1
-                        )
+                        candidate["retry_counts"][item] = candidate["retry_counts"].get(item, 0) + 1
                     candidate["accepted"] = {
-                        item: value for item, value in candidate["accepted"].items()
-                        if item in kept
+                        item: value for item, value in candidate["accepted"].items() if item in kept
                     }
                     candidate["retired_ids"].update(old_keys - new_keys)
                     candidate["retired_ids"].update(fresh_ids)
                     candidate["steps"] = new_steps
                     candidate["node_statuses"] = {
-                        item: ("accepted" if item in kept else "pending")
-                        for item in new_keys
+                        item: ("accepted" if item in kept else "pending") for item in new_keys
                     }
                     candidate["queue"] = []
                     candidate["replans_used"] += 1
@@ -1956,10 +2062,7 @@ def run_autonomous_derivation(
                     candidate["backtracking"].append(
                         Backtrack(
                             "PLAN",
-                            [
-                                _display_node_key(item, old_steps)
-                                for item in sorted(invalidated)
-                            ],
+                            [_display_node_key(item, old_steps) for item in sorted(invalidated)],
                             diagnostic,
                         )
                     )
@@ -1986,9 +2089,7 @@ def run_autonomous_derivation(
                     kind, target = chosen_target.split(":", 1)
                     nodes_now, by_key_now, deps_now = graph(candidate)
                     if kind == "parent":
-                        affected = {
-                            item["key"] for item in nodes_now if item["step_id"] == target
-                        }
+                        affected = {item["key"] for item in nodes_now if item["step_id"] == target}
                     else:
                         affected = {target}
                     changed = True
@@ -1996,19 +2097,20 @@ def run_autonomous_derivation(
                         changed = False
                         for candidate_node in nodes_now:
                             if candidate_node["key"] not in affected and any(
-                                dependency in affected for dependency in deps_now[candidate_node["key"]]
+                                dependency in affected
+                                for dependency in deps_now[candidate_node["key"]]
                             ):
                                 affected.add(candidate_node["key"])
                                 changed = True
-                    ordered_affected = [item["key"] for item in nodes_now if item["key"] in affected]
+                    ordered_affected = [
+                        item["key"] for item in nodes_now if item["key"] in affected
+                    ]
                     exhausted = [
-                        affected_key for affected_key in ordered_affected
+                        affected_key
+                        for affected_key in ordered_affected
                         if candidate["retry_counts"].get(affected_key, 0)
                         >= retry_limit(by_key_now[affected_key])
-                        and (
-                            affected_key in candidate["accepted"]
-                            or affected_key == key
-                        )
+                        and (affected_key in candidate["accepted"] or affected_key == key)
                     ]
                     if exhausted:
                         candidate["backtracking"].append(
@@ -2066,7 +2168,8 @@ def run_autonomous_derivation(
                     parent = next(item for item in candidate["steps"] if item.id == node["step_id"])
                     children = list(parent.substeps)
                     child_index = next(
-                        index for index, item in enumerate(children)
+                        index
+                        for index, item in enumerate(children)
                         if item.id == (node["substep_id"] or "main")
                     )
                     child_id = insertion["id"]
@@ -2167,18 +2270,15 @@ def run_autonomous_derivation(
                     blocks[-1].strip() if blocks else proposal.strip()[:800]
                 )
             accepted_parent = all(
-                f"{step.id}.{item.id}" in candidate["accepted"]
-                for item in step.substeps
+                f"{step.id}.{item.id}" in candidate["accepted"] for item in step.substeps
             )
             publish(candidate)
             if accepted_parent:
                 parent_content = "\n\n".join(
-                    state["accepted"][f"{step.id}.{item.id}"]["content"]
-                    for item in step.substeps
+                    state["accepted"][f"{step.id}.{item.id}"]["content"] for item in step.substeps
                 )
                 parent_audit = "\n\n".join(
-                    state["accepted"][f"{step.id}.{item.id}"]["audit"]
-                    for item in step.substeps
+                    state["accepted"][f"{step.id}.{item.id}"]["audit"] for item in step.substeps
                 )
                 log.emit(
                     "step.accepted",
@@ -2275,16 +2375,16 @@ def run_autonomous_derivation(
         if result.status == "failed" and not result.error:
             result.error = state.get("error", "Workflow failed.")
             result.error_code = state.get("error_code")
+        refresh_reports(force=True)
         try:
             (run_dir / "outcome.json").write_text(
                 json.dumps(result.to_dict(), indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-            _write_markdown_reports(result)
-        except OSError as exc:
-            if not result.error:
-                result.error = f"Final diagnostic write failed: {exc}"
-                if result.status.startswith("completed_"):
-                    result.status = "failed"
-                    result.error_code = "diagnostic_write_failed"
+        except Exception:
+            _LOGGER.warning(
+                "Could not write autonomous outcome %s",
+                run_dir / "outcome.json",
+                exc_info=True,
+            )
     return result

@@ -38,12 +38,6 @@ def test_angle_bounds():
         Kinematics.from_s_cos_theta(-4.0, 0.0)
 
 
-def test_forward_stays_in_physical_region_at_any_scale():
-    for s in (1e-8, 1.0, 1e8):
-        kin = Kinematics.forward(s)
-        assert kin.is_physical_s_channel and kin.t < 0 and kin.u < 0
-
-
 def test_scaling_positive_only():
     with pytest.raises(ValueError):
         Kinematics.from_s_t(1.0, -0.5).scaled(-1.0)

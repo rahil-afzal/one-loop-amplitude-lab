@@ -36,19 +36,6 @@ class Kinematics:
             raise ValueError("cos(theta) must lie strictly inside (-1, 1).")
         return cls(s=s, t=-s * (1.0 - cos_theta) / 2.0, u=-s * (1.0 + cos_theta) / 2.0)
 
-    @classmethod
-    def forward(cls, s: float, rel_eps: float = 1e-6) -> Kinematics:
-        """Near-forward point t = -rel_eps * s (strictly inside the physical region).
-
-        Only the imaginary part of the amplitude is finite as t -> 0: the real part
-        contains -ln(-t/mu2). Callers must not use a finite real forward amplitude.
-        """
-        if s <= 0.0:
-            raise ValueError("Forward kinematics requires s > 0.")
-        if not 0.0 < rel_eps < 1.0:
-            raise ValueError("rel_eps must lie in (0, 1).")
-        return cls.from_s_t(s, -rel_eps * s)
-
     def as_tuple(self) -> tuple[float, float, float]:
         return (self.s, self.t, self.u)
 

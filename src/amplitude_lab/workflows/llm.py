@@ -258,7 +258,8 @@ class OpenAICompatibleLLM:
         except Exception as exc:
             message = _redact(f"{type(exc).__name__}: {exc}", self._key)
             if (
-                type(exc).__name__ in {
+                type(exc).__name__
+                in {
                     "APIError",
                     "APIConnectionError",
                     "APITimeoutError",
