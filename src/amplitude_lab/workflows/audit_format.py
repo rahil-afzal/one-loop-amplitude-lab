@@ -139,17 +139,22 @@ class IssueLedger:
         return [issue for issue in self.issues.values() if issue.status == "OPEN"]
 
     def add_blocking(self, items: list[str], attempt: int) -> list[Issue]:
-        """Open blocking items, retaining only harness ids already known to this ledger."""
+        """Open blocking items. Reuse a harness id only if that issue is still OPEN.
+
+        The auditor's claimed id is never trusted for a new issue, and is stripped
+        from the stored text so PREVIOUS round-trips against harness ids only.
+        """
         opened = []
         for item in items:
-            claimed_id = item.split("|", 1)[0].strip().upper()
-            if claimed_id in self.issues:
-                issue = self.issues[claimed_id]
-                issue.status = "OPEN"
-                issue.text = item
+            head, separator, rest = item.partition("|")
+            claimed_id = head.strip().upper()
+            body = (rest.strip() if separator else item) or item
+            issue = self.issues.get(claimed_id)
+            if issue is not None and issue.status == "OPEN":
+                issue.text = body
             else:
                 self._counter += 1
-                issue = Issue(f"B{self._counter}", item, attempt)
+                issue = Issue(f"B{self._counter}", body, attempt)
                 self.issues[issue.harness_id] = issue
             opened.append(issue)
         return opened

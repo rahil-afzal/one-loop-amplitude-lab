@@ -16,6 +16,7 @@ beta sign follows ``conventions.BETA_C4_COEFFICIENT``.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 
 import mpmath as mp
@@ -116,7 +117,7 @@ def check_loop(expr: sp.Expr) -> list[Check]:
             except Exception as exc:
                 return [_evaluation_failed("loop_physical_region", exc)]
             error = abs(got - expected) / max(1.0, abs(expected))
-            if error >= worst:
+            if not (error < worst):
                 worst = error
                 worst_row = {"s": s, "t": t, "mu2": mu2, "got": str(got), "expected": str(expected)}
     ok = worst < 1e-6
@@ -184,3 +185,100 @@ def verify_final_answer(text: str) -> VerificationReport:
     if "beta_c4" in exprs:
         checks.append(check_beta(exprs["beta_c4"]))
     return VerificationReport(parsed, checks)
+
+# ---------------------------------------------------------------------------
+# Harness-facing helpers: grammar discovery, local lint, verbatim feedback.
+# ---------------------------------------------------------------------------
+
+_PROBE_NAMES = ("s", "t", "u", "c4", "mu", "mu2", "pi", "I", "i", "E", "e", "eps")
+_PROBE_FUNCS = ("log", "ln", "exp", "sqrt", "sin", "cos", "abs")
+
+
+@lru_cache(maxsize=1)
+def safe_syntax_spec() -> dict:
+    """Discover the safe-arithmetic grammar by probing the parser itself."""
+    def ok(text: str) -> bool:
+        try:
+            parse_expression(text, extra_names=EXTRA_NAMES)
+        except Exception:
+            return False
+        return True
+
+    names = [n for n in _PROBE_NAMES if ok(n)]
+    funcs = [f for f in _PROBE_FUNCS if ok(f"{f}(s)")]
+    powers = [op for op, txt in (("**", "s**2"), ("^", "s^2")) if ok(txt)]
+    return {
+        "required_keys": list(KEYS),
+        "allowed_names": names,
+        "allowed_functions": funcs,
+        "power_operators": powers,
+        "imaginary_unit": "I" if "I" in names else ("i" if "i" in names else None),
+        "scale_symbol": "mu2" if "mu2" in names else None,
+        "notes": (
+            "log is the natural logarithm on the principal branch. "
+            "mu2 denotes mu^2; the symbol mu is NOT available. "
+            "Expressions are parsed by a strict AST allowlist and never executed."
+        ),
+    }
+
+
+def lint_final_block(proposal: str, *, require_terminal: bool = True) -> list[str]:
+    """Machine-checkable problems, with the parser's own message. [] means clean."""
+    text = (proposal or "").rstrip()
+    matches = list(_FENCE.finditer(text))
+    if not matches:
+        return ["No fenced `final` block was found."]
+    problems: list[str] = []
+    if len(matches) > 1:
+        problems.append(f"{len(matches)} `final` blocks found; emit exactly one.")
+    if require_terminal and matches[-1].end() != len(text):
+        problems.append("The `final` block must be the last content in the message.")
+    raw = extract_final_block(text)
+    for key in KEYS:
+        if key not in raw:
+            problems.append(f"{key}: missing from final block.")
+            continue
+        try:
+            expr = parse_expression(raw[key], extra_names=EXTRA_NAMES)
+        except CandidateParseError as exc:
+            problems.append(f"{key}: rejected by the safe-expression parser: {exc}")
+            continue
+        try:
+            _numeric(expr, _point(*POINTS[0], 1.0))
+        except Exception as exc:
+            problems.append(
+                f"{key}: parses but fails to evaluate: {type(exc).__name__}: {exc}"
+            )
+    return problems
+
+
+def parsed_expressions(text: str) -> dict:
+    """Parse whatever entries of the final block are parseable (for invariant checks)."""
+    raw = extract_final_block(text)
+    out = {}
+    for key in KEYS:
+        if key in raw:
+            try:
+                out[key] = parse_expression(raw[key], extra_names=EXTRA_NAMES)
+            except CandidateParseError:
+                pass
+    return out
+
+
+def failed_check_feedback(report: VerificationReport) -> str:
+    """Verbatim failed-check messages, not just check names."""
+    return "Deterministic checks failed:\n" + "\n".join(
+        f"- {c.name}: {c.message}" for c in report.checks if not c.passed
+    )
+
+
+CHECK_QUANTITY = {
+    "parse_A_tree": "A_tree",
+    "tree_value": "A_tree",
+    "parse_A_loop": "A_loop",
+    "loop_physical_region": "A_loop",
+    "loop_diagnosis": "A_loop",
+    "crossing_symmetry": "A_loop",
+    "parse_beta_c4": "beta_c4",
+    "beta_c4": "beta_c4",
+}

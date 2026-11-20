@@ -16,7 +16,19 @@ from typing import Callable
 
 from .audit_format import IssueLedger, ParsedAudit, decide, parse_audit
 from .llm import LLMError
-from .verification import verify_final_answer
+from .verification import (
+    CHECK_QUANTITY,
+    failed_check_feedback,
+    lint_final_block,
+    parsed_expressions,
+    safe_syntax_spec,
+    verify_final_answer,
+)
+from .invariants import (
+    conventions_from_prompt,
+    lagrangian_sign_from_text,
+    verify_invariants,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +37,9 @@ PLAN_SYSTEM = (
     "problem and identify the theory, requested quantity, and assumptions that affect the "
     "derivation. Formulate the theory's explicit Lagrangian from its name and stated "
     "conventions; do not require the user to provide the full Lagrangian. If the theory does "
-    "not determine it uniquely, make the ambiguity explicit in assumptions. The first plan "
+    "not determine it uniquely, make the ambiguity explicit in assumptions. Conventions the "
+    "problem states explicitly are BINDING: never override them with a physical preference "
+    "such as vacuum stability, and never record a stated convention as an ambiguity. The first plan  "
     "step must establish and justify this Lagrangian so it can be independently audited. "
     "Break parent steps into small auditable substeps and include a non-empty `substeps` array "
     "on each parent; child dependencies are local to that parent. "
@@ -68,7 +82,10 @@ DERIVATION_SYSTEM = (
     "verify nontrivial algebra and do not skip essential steps. Use clear Markdown and delimit "
     "inline mathematics with `$...$` and displayed equations with `$$...$$`. Do not provide "
     "private chain-of-thought. Always obey the notation contract in the accepted checkpoints; "
-    "never redefine a symbol they define. Compute scratch work silently and never write "
+    "never redefine a symbol they define. Conventions stated explicitly in original_problem "
+    "and hard_constraints OUTRANK the planner, the notation contract, and every accepted "
+    "checkpoint. If a checkpoint contradicts them, follow original_problem, say so in one line, "
+    "and apply the documented mapping to the affected results. Compute scratch work silently and never write  "
     "retractions ('wait', 'let me redo'); show only the clean chain. End with a `checkpoint` "
     "block listing this step's key results; emit a `final` block only if the task says this is "
     "the last step. REVISION MODE: if you are given a previous proposal and audit issues, treat "
@@ -103,7 +120,14 @@ AUDIT_SYSTEM = (
     "its parent step id on a rejection invalidates that parent's full substep subtree "
     "and dependent checkpoints; name a specific child checkpoint to invalidate only "
     "that child and its dependents.\n"
-    "Write math in plain text without backslashes."
+    "Conventions stated explicitly in original_problem and hard_constraints are BINDING. A "
+    "proposal that redefines them (opposite sign for the interaction coefficient, a renamed "
+    "symbol the problem defines, a different amplitude or scheme convention) is BLOCKING even "
+    "if internally consistent, and even if the planner or an accepted checkpoint made the same "
+    "choice. Physical preference such as vacuum stability never overrides a stated convention; "
+    "report that as MINOR at most. When a deterministic check reports a sign opposite to the "
+    "reference, treat it as a convention violation, not a formatting issue. "
+    "Write math in plain text without backslashes. "
 )
 
 _STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -1030,6 +1054,9 @@ def _snapshot_state(state: dict) -> dict:
             key: ledger.to_dict() for key, ledger in state.get("ledgers", {}).items()
         },
         "feedback": dict(state.get("feedback", {})),
+        "last_proposals": dict(state.get("last_proposals", {})),
+        "det_checks": dict(state.get("det_checks", {})),
+        "hard_constraints": dict(state.get("hard_constraints", {})),
         "interpretation": state.get("interpretation", ""),
         "lagrangian": state.get("lagrangian", ""),
         "strategy": state.get("strategy", ""),
@@ -1466,23 +1493,44 @@ def run_autonomous_derivation(
             "planning",
             message="Derivation agent is interpreting the problem.",
         )
-        plan_text = _complete(
-            derivation_llm,
-            PLAN_SYSTEM,
-            [{"role": "user", "text": task.derivation_prompt}],
-            _token_handler(log, "planning", "derivation"),
-        )
-        plan_candidate = deepcopy(state)
-        plan_candidate["planner_responses"].append(plan_text)
-        publish(plan_candidate)
-        (run_dir / "plan_raw.md").write_text(plan_text, encoding="utf-8")
-        steps = parse_plan(plan_text)
-        (
-            result.interpretation,
-            result.lagrangian,
-            result.strategy,
-            result.assumptions,
-        ) = _plan_overview(plan_text)
+        hard = conventions_from_prompt(task.derivation_prompt)
+        state["hard_constraints"] = hard.as_dict() if hard is not None else {}
+        plan_request = task.derivation_prompt
+        for plan_round in range(2):
+            plan_text = _complete(
+                derivation_llm,
+                PLAN_SYSTEM,
+                [{"role": "user", "text": plan_request}],
+                _token_handler(log, "planning", "derivation"),
+            )
+            plan_candidate = deepcopy(state)
+            plan_candidate["planner_responses"].append(plan_text)
+            publish(plan_candidate)
+            (run_dir / "plan_raw.md").write_text(plan_text, encoding="utf-8")
+            steps = parse_plan(plan_text)
+            (
+                result.interpretation,
+                result.lagrangian,
+                result.strategy,
+                result.assumptions,
+            ) = _plan_overview(plan_text)
+            proposed = lagrangian_sign_from_text(result.lagrangian)
+            if (
+                hard is None
+                or proposed is None
+                or proposed == hard.lagrangian_sign
+                or plan_round
+            ):
+                break
+            conflict = (
+                f"The proposed Lagrangian uses interaction sign {proposed:+d}, but the problem "
+                f"states a binding convention with sign {hard.lagrangian_sign:+d}: "
+                f"L_int = {hard.lagrangian_sign:+d}*c4*phi^4/4!, hence A_tree = {hard.tree}. "
+                "Re-plan using the stated convention. Do not record it as an ambiguity and do "
+                "not substitute a stability requirement the problem did not ask for."
+            )
+            log.emit("plan.convention_conflict", "planning", message=conflict)
+            plan_request = task.derivation_prompt + "\n\nBinding correction: " + conflict
         state["interpretation"] = result.interpretation
         state["lagrangian"] = result.lagrangian
         state["strategy"] = result.strategy
@@ -1520,7 +1568,9 @@ def run_autonomous_derivation(
             ]
             if not unfinished:
                 if task.name == "phi4_dim4":
-                    content = "\n\n".join(row["content"] for row in result.accepted_steps)
+                    content = (
+                        result.accepted_steps[-1]["content"] if result.accepted_steps else ""
+                    )
                     log.emit("verification.started", "verifying")
                     report = verify_final_answer(content)
                     checks = report.to_dict()
@@ -1571,7 +1621,24 @@ def run_autonomous_derivation(
                     failed_attempt = candidate["attempts"][attempt_index]
                     failed_attempt.status = "deterministic_rejection"
                     failed_attempt.deterministic_checks = checks
-                    diagnostic = "Deterministic checks failed: " + ", ".join(report.failed_names)
+                    diagnostic = failed_check_feedback(report)
+                    invariant_checks = verify_invariants(
+                        parsed_expressions(content),
+                        conventions_from_prompt(task.derivation_prompt),
+                    )
+                    checks["invariants"] = invariant_checks
+                    failed_invariants = [c for c in invariant_checks if not c["passed"]]
+                    if failed_invariants:
+                        diagnostic += "\n\nInvariant / convention violations:\n" + "\n".join(
+                            f"- {c['name']}: {c['message']}" for c in failed_invariants
+                        )
+                    diagnostic += (
+                        "\n\nQuantities implicated: "
+                        + ", ".join(sorted({
+                            CHECK_QUANTITY.get(name, name)
+                            for name in report.failed_names
+                        }))
+                    )
                     affected = {failed_key}
                     changed = True
                     while changed:
@@ -1592,6 +1659,10 @@ def run_autonomous_derivation(
                     ]
                     if exhausted:
                         for item in ordered_affected:
+                            row = candidate["accepted"].get(item, {})
+                            if row.get("proposal"):
+                                candidate.setdefault("last_proposals", {})[item] = row["proposal"]
+                            candidate.setdefault("det_checks", {})[item] = checks["checks"]
                             candidate["accepted"].pop(item, None)
                             candidate["node_statuses"][item] = "pending"
                         _exhaust_node(candidate, failed_key, nodes_now, deps_now, diagnostic)
@@ -1599,6 +1670,10 @@ def run_autonomous_derivation(
                         log.emit("verification.finished", "verifying", passed=False, checks=checks)
                         break
                     for item in ordered_affected:
+                        row = candidate["accepted"].get(item, {})
+                        if row.get("proposal"):
+                            candidate.setdefault("last_proposals", {})[item] = row["proposal"]
+                        candidate.setdefault("det_checks", {})[item] = checks["checks"]
                         candidate["accepted"].pop(item, None)
                         candidate["node_statuses"][item] = "pending"
                         candidate["retry_counts"][item] = candidate["retry_counts"].get(item, 0) + 1
@@ -1694,19 +1769,25 @@ def run_autonomous_derivation(
                 },
                 "accepted_dependencies": dependency_rows,
                 "notation_contract": result.notation_contract,
+                "original_problem": task.derivation_prompt,
+                "hard_constraints": state.get("hard_constraints", {}),
             }
+            first_node = nodes[0]["key"]
+            last_node = nodes[-1]["key"]
+            if key == last_node:
+                prompt["safe_syntax"] = safe_syntax_spec()
             feedback = state["feedback"].get(key, "")
             if feedback:
                 prompt["revision_mode"] = {
-                    "previous_proposal": state["accepted"].get(key, {}).get("proposal", ""),
-                    "blocking_issues": state["accepted"].get(key, {}).get("blocking_lines", []),
+                    "previous_proposal": state.get("last_proposals", {}).get(key, ""),
+                    "blocking_issues": [
+                        issue.text
+                        for issue in state["ledgers"].get(key, IssueLedger()).open_issues()
+                    ],
                     "open_issue_ids": sorted(result.open_issues.get(key, {})),
+                    "deterministic_checks": state.get("det_checks", {}).get(key, []),
                     "diagnostic": feedback,
                 }
-            first_node = nodes[0]["key"]
-            if key == first_node:
-                prompt["original_problem"] = task.derivation_prompt
-            last_node = nodes[-1]["key"]
             event_ids = {"step_id": node["step_id"]}
             if node["substep_id"] is not None:
                 event_ids["substep_id"] = node["substep_id"]
@@ -1776,10 +1857,19 @@ def run_autonomous_derivation(
             )
             candidate = deepcopy(state)
             candidate["attempts"].append(attempt)
+            candidate.setdefault("last_proposals", {})[key] = proposal
             candidate["node_statuses"][key] = "awaiting_audit"
             publish(candidate)
             attempt_index = len(state["attempts"]) - 1
             hygiene = _hygiene_problem(proposal, key == last_node)
+            if not hygiene and key == last_node:
+                lint_problems = lint_final_block(proposal)
+                if lint_problems:
+                    hygiene = (
+                        "Final block failed local checks. Fix exactly these; the physics need "
+                        "not be re-derived unless a check says so:\n"
+                        + "\n".join(f"- {item}" for item in lint_problems)
+                    )
             if hygiene:
                 attempt = deepcopy(state["attempts"][attempt_index])
                 attempt.verdict = "HYGIENE"
@@ -1840,8 +1930,10 @@ def run_autonomous_derivation(
                     "prompt. PREVIOUS must cover every previous blocking issue id."
                 ),
             }
-            if key == first_node:
-                audit_prompt["original_problem"] = task.derivation_prompt
+            audit_prompt["original_problem"] = task.derivation_prompt
+            audit_prompt["hard_constraints"] = state.get("hard_constraints", {})
+            if key == last_node:
+                audit_prompt["safe_syntax"] = safe_syntax_spec()
             raw_audits = []
             chosen = None
             chosen_target = "current"
