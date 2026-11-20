@@ -1225,9 +1225,15 @@ def run_autonomous_derivation(
         max_substep_retries = max_step_retries
     if not task.derivation_prompt.strip():
         raise ValueError(f"task {task.name!r} has no derivation prompt")
+    import copy as _copy
+
+    capped = []
     for client in (derivation_llm, audit_llm):
-        if hasattr(client, "timeout"):
-            client.timeout = min(float(client.timeout), 119.0)
+        if hasattr(client, "timeout") and float(client.timeout) > 119.0:
+            client = _copy.copy(client)
+            client.timeout = 119.0
+        capped.append(client)
+    derivation_llm, audit_llm = capped
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_dir = Path(runs_dir) / f"{stamp}-{task.name}-agent"
